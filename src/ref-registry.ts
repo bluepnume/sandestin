@@ -26,13 +26,13 @@ export const getRefOptions = ({ fn } : FunctionOptions) : RefOptions<never> =>
 
 export const isRevoked = ({ fn } : FunctionOptions) : boolean => revoked.has(fn);
 
-type RevokeListenerOptions = {
+type OnRevokeOptions = {
     readonly fn : AnyFunction,
     readonly listener : () => void,
 };
 
 // Lets a table learn when a function it holds is revoked.
-export const onRevoke = ({ fn, listener } : RevokeListenerOptions) : void => {
+export const onRevoke = ({ fn, listener } : OnRevokeOptions) : void => {
     const listeners = revocationListeners.get(fn) ?? new Set();
 
     listeners.add(listener);
