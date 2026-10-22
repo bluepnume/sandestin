@@ -1,20 +1,28 @@
 {
-    "name": "cugel-boilerplate",
+    "name": "sandestin",
     "version": "0.1.0",
-    "description": "Starting point for a TypeScript library on cugel-scripts: one exported function, node and browser tests, a tree-shaking check, and the publish workflow. Clone it, rename it, write code.",
+    "description": "Serialize values across any boundary with functions and promises kept live. Pass a callback across, get back a reference that calls home; structured-clone native, JSON optional, lifetime and security in your hands.",
     "keywords": [
-        "template",
-        "boilerplate",
-        "typescript",
+        "serialize",
+        "serialization",
+        "serdes",
+        "rpc",
+        "postmessage",
+        "iframe",
+        "worker",
+        "structured-clone",
+        "function-reference",
+        "capability",
+        "post-robot",
         "cugel"
     ],
-    "homepage": "https://github.com/bluepnume/cugel-boilerplate#readme",
+    "homepage": "https://github.com/bluepnume/sandestin#readme",
     "bugs": {
-        "url": "https://github.com/bluepnume/cugel-boilerplate/issues"
+        "url": "https://github.com/bluepnume/sandestin/issues"
     },
     "repository": {
         "type": "git",
-        "url": "git+https://github.com/bluepnume/cugel-boilerplate.git"
+        "url": "git+https://github.com/bluepnume/sandestin.git"
     },
     "license": "MIT",
     "author": "Daniel Brain",
@@ -27,6 +35,10 @@
         ".": {
             "types": "./dist/src/index.d.ts",
             "import": "./dist/src/index.js"
+        },
+        "./testing": {
+            "types": "./dist/src/testing/index.d.ts",
+            "import": "./dist/src/testing/index.js"
         },
         "./package.json": "./package.json"
     },
