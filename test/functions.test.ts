@@ -1,8 +1,35 @@
+import { runInNewContext } from 'node:vm';
+
 import type { Ref } from '../src';
 
 import { isRef, ref, release, ReleasedError, revoke } from '../src';
 
 import { pair } from './helpers';
+
+describe('objects from another realm', () => {
+    it('walks a plain object made in another realm, so its functions stay live', async () => {
+        const [ a, b ] = pair();
+
+        // An object literal from a same-origin frame has that frame's Object.prototype.
+        const api = runInNewContext('({ double: (value) => value * 2, nested: { list: [ 1, 2 ] } })') as {
+            double : (value : number) => number,
+            nested : { list : ReadonlyArray<number> },
+        };
+
+        // Through the text form, as it crosses a window boundary.
+        const remote = b.decodeJSON<typeof api>({ text: a.encodeJSON({ value: api }) });
+
+        expect(await remote.double(21)).toBe(42);
+        expect(remote.nested).toEqual({ list: [ 1, 2 ] });
+    });
+
+    it('still passes a class instance from another realm through as data', () => {
+        const [ a, b ] = pair();
+        const instance = runInNewContext('new (class Thing { constructor() { this.x = 1; } })()') as { x : number };
+
+        expect(b.decodeJSON({ text: a.encodeJSON({ value: { instance } }) })).toEqual({ instance: { x: 1 } });
+    });
+});
 
 describe('functions cross as live references', () => {
     it('calls the original and returns its result', async () => {

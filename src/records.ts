@@ -71,5 +71,11 @@ export const isPlainObject = (value : unknown) : value is Record<string, unknown
 
     const proto : unknown = Object.getPrototypeOf(value);
 
-    return proto === Object.prototype || proto === null;
+    // An object literal from another realm (a same-origin frame, a vm
+    // context) has that realm's Object.prototype, which is itself the end of
+    // its chain; a class instance, Date or Map has one more link.
+    return proto === null || (
+        Object.prototype.toString.call(value) === '[object Object]' &&
+        Object.getPrototypeOf(proto) === null
+    );
 };
