@@ -2,7 +2,7 @@
 
 Serialize values across a boundary with the functions and promises inside them kept alive.
 
-Pass an object with a callback in it to another window, worker or process. On the far side, the callback is still callable: calling it runs the original where it lives and resolves with the result. Promises inside the value settle on the far side when they settle at home. Everything else goes across as plain JSON-safe data, with `Date`, `Map`, typed arrays and the like rebuilt on arrival. That is the whole idea, and the package does only that: it does not open windows, send messages, or know what an origin is. Those are yours to plug in, which is how it stays small and how you keep control of security.
+Pass an object with a callback in it to another window, worker or process. On the far side, the callback is still callable: calling it runs the original where it lives and resolves with the result. Promises inside the value settle on the far side when they settle at home. Everything else goes across as plain JSON-safe data. That is the whole idea, and the package does only that: it does not open windows, send messages, or know what an origin is. Those are yours to plug in, which is how it stays small and how you keep control of security.
 
 A sandestin, in Jack Vance's Dying Earth books, is a bound entity that carries out a magician's instructions from afar, for exactly as long as the binding holds. Same deal.
 
@@ -64,7 +64,7 @@ Read the two `sandestin` calls as "how do I reach the other side": each outbound
 
 Three rules:
 
-- **Data goes by value.** Objects, arrays, strings, numbers, booleans and `null` are themselves on the wire. `Date`, `Map`, `Set`, `RegExp`, `bigint`, typed arrays, `ArrayBuffer`, `undefined`, cycles and shared references become small tagged records and are rebuilt on the far side as what they were. Anything else, a class instance say, is passed through as a plain object and loses its prototype, unless you register a custom type for it.
+- **Data goes by value.** Objects, arrays, strings, numbers, booleans, `null` and `undefined` are themselves on the wire; cycles and shared references become small tagged records and are rebuilt on the far side as what they were. Anything else, a `Date`, a `Map`, a class instance, is passed through untouched and becomes whatever the transport makes of it, unless a type is registered for it: the package ships `dateType`, `regExpType`, `mapType`, `setType`, `bigintType`, `bytesType` and `messagePortType` as opt-in types, so a bundle only carries the ones you list.
 - **Functions go by reference.** A function becomes a handle. The far side gets a *ref*: a function that, when called, sends the arguments back and resolves with the result. Arguments and results follow the same three rules, so callbacks nest to any depth and a ref can be handed back or forwarded on. The function's `name` travels with it, so a ref is named like the original and so are the errors about it.
 - **Promises go by reference.** A promise becomes a handle and the far side gets a real `Promise` that settles when the original does, with the resolved value or rejection reason crossing by these same rules. Anything with a `then` method counts, the same rule `await` uses, so a library's own promise class crosses too.
 
@@ -92,7 +92,7 @@ The wire `encode` produces is plain JSON: only objects, arrays, strings, numbers
 
 - `encode({ value })` gives you the wire as an object. Hand it to `postMessage`, a `MessagePort`, a `Worker` or a `BroadcastChannel` and it crosses as is.
 - `encodeJSON({ value })` gives you the same wire as text, for WebSocket, `child_process` IPC, HTTP and anything else that carries strings. `decodeJSON({ text })` is the inverse.
-- `encode({ value, transferable: true })` gives you `{ wire, transfer }`: `ArrayBuffer`s, typed arrays and `MessagePort`s are left native in the wire and listed in `transfer`, ready for `postMessage(wire, transfer)`. Without this flag bytes go as base64 and a `MessagePort` is refused, since there is no way to carry one as text.
+- `encode({ value, transferable: true })` gives you `{ wire, transfer }`: types that can (`bytesType`, `messagePortType`, or your own, by returning `native({ value, transfer })` from `encode`) leave a value native in the wire and list what `postMessage(wire, transfer)` should transfer. Without this flag `bytesType` goes as base64 and `messagePortType` refuses, since there is no way to carry a port as text.
 
 Every special value shares one record shape, `{ $type, $value }`. A user object that happens to have a `$type` key is escaped on the way out and unescaped on the way in, so there are no reserved keys. `-0` becomes `0`, as it does in JSON.
 
@@ -116,7 +116,7 @@ const money : CustomType<Money, { cents : number, currency : string }> = {
 const a = sandestin({ types: [ money ], /* ...hooks */ });
 ```
 
-Custom types are tried before the built-ins, so you can override how a `Date` crosses if you need to. The encoded form is walked by the same rules, so it may contain functions, promises, other custom types, or anything else that crosses. Both sides must register the type; a record nobody can decode is an error, not a silent object. Both `encode` and `decode` also receive the `context` of the operation they are part of (see below), so a type that needs to know which peer it is talking to can look.
+Types are tried in the order given, so the first that matches wins; the shipped ones are ordinary custom types and `builtinTypes` is the list of all of them. The encoded form is walked by the same rules, so it may contain functions, promises, other custom types, or anything else that crosses. Both sides must register the type; a record nobody can decode is an error, not a silent object. Both `encode` and `decode` also receive the `context` of the operation they are part of (see below), so a type that needs to know which peer it is talking to can look, and `encode` receives `transferable`.
 
 That last point is how you carry something by *reference*: encode it as an object of functions that act on the original, and add `release` to hear when the far side has let go of all of them:
 
@@ -173,9 +173,11 @@ const same = await copy.add.invoke({ args: [ { id: 'B08N5WRWNW' } ], signal: Abo
 await copy.notify.invoke({ args: [ 'done' ], reply: false });   // fire and forget
 ```
 
-When the signal fires, the call rejects with the signal's reason and the transport hook sees the same signal, so it can stop waiting too. An already-aborted signal rejects without crossing at all. Set `callTimeout` on the instance and every call, plain or `invoke`, gets `AbortSignal.timeout(callTimeout)` combined with whatever you pass.
+When the signal fires, the call rejects with the signal's reason and the transport hook sees the same signal, so it can stop waiting too. An already-aborted signal rejects without crossing at all.
 
 `reply: false` resolves with `undefined` once the call is on its way; whatever the far side returns or throws is dropped. The transport hook sees `reply: false` and may send one way and resolve with nothing.
+
+There is no instance-wide timeout; `AbortSignal.timeout(ms)` on each `invoke` is the same thing without the extra code.
 
 ## Context
 
@@ -224,8 +226,7 @@ One instance per peer. The options are the outbound half: what this side needs d
 | `releaseRemoteHandle({ handle, context })` | A ref is released, or collected | Tell the far side; no reply |
 | `watchRemotePromise({ handle, context })` | A promise handle is decoded | Resolve with the far side's `Outcome`; reject if it cannot be had |
 | `authorizeInboundRequest({ handle, context, handleContext, target })` | Any inbound request arrives | Return `true` to allow; optional, default allows all |
-| `types` | Encoding and decoding | A list of `CustomType`s; optional |
-| `callTimeout` | Every outbound call | Milliseconds before a call rejects with a `TimeoutError`; optional |
+| `types` | Encoding and decoding | A list of `CustomType`s, shipped or your own; optional |
 | `includeStacks` | Encoding an error | `true` to ship `stack`; default `false` |
 
 The returned instance has the inbound half, which your transport calls when a message arrives, plus the codec:
@@ -261,7 +262,7 @@ The returned instance has the inbound half, which your transport calls when a me
 
 ### Types
 
-`Remote<T>` is what `T` looks like after crossing: functions become `Ref`s (callable, async, disposable, with `invoke`), promises stay promises, everything else is itself. `decode<Api>({ wire })` returns `Remote<Api>`; with no type argument it returns `unknown`, because the wire cannot say what came across. A value sent back to its owner is the original, which `Remote<T>` cannot express; narrow with `isRef` when it matters. `CustomType<Value, Wire, Context>` is the shape of a `types` entry.
+`native({ value, transfer? })` is what a custom type's `encode` returns to leave a value out of the JSON on a transferable encode. `Remote<T>` is what `T` looks like after crossing: functions become `Ref`s (callable, async, disposable, with `invoke`), promises stay promises, everything else is itself. `decode<Api>({ wire })` returns `Remote<Api>`; with no type argument it returns `unknown`, because the wire cannot say what came across. A value sent back to its owner is the original, which `Remote<T>` cannot express; narrow with `isRef` when it matters. `CustomType<Value, Wire, Context>` is the shape of a `types` entry.
 
 ### `sandestin/testing`
 
@@ -327,7 +328,7 @@ Five message types, one security check, and the transport never looks inside a v
 
 **[post-robot](https://github.com/krakenjs/post-robot)** is the direct ancestor: JSON plus function references, passed across windows, with a `send`/`on` messaging layer and origin checks built in. sandestin keeps the rule and drops the rest. Promises cross as well as functions, references are released when the holder lets go instead of living until the window closes, functions carry their names, calls take a signal, the messaging layer and origin checks are left to you so the package is not tied to windows, and it targets current runtimes only, so there is no bridge for old browsers. What post-robot did implicitly is kept: a function sent back to its owner is the original, called functions see the caller as `this`, and fire-and-forget calls exist.
 
-**[universal-serialize](https://github.com/krakenjs/universal-serialize)** is post-robot's serializer: a `JSON.stringify` replacer with a per-type table. sandestin borrows that structure, one record shape and a per-type table that you can extend, and adds what it lacks: cycles and shared references, transferables, the reference table and lifetime, and the inbound gate. It is a different layer rather than an alternative; universal-serialize left function and promise handling as hooks for post-robot to fill, which is exactly the part this package owns.
+**[universal-serialize](https://github.com/krakenjs/universal-serialize)** is post-robot's serializer: a `JSON.stringify` replacer with a per-type table. sandestin borrows that structure, one record shape and a per-type table, and goes further: every type beyond plain JSON is an entry you choose to list, and it adds what universal-serialize lacks, cycles and shared references, transferables, the reference table and lifetime, and the inbound gate. It is a different layer rather than an alternative; universal-serialize left function and promise handling as hooks for post-robot to fill, which is exactly the part this package owns.
 
 **[Cap'n Web](https://github.com/cloudflare/capnweb)** is the serious prior art: an object-capability RPC with functions and objects by reference, bidirectional calls, promise pipelining and its own transports. It is a complete RPC system, and its lifetime rules follow from that: every stub must be explicitly disposed, a callback received as a parameter dies when the call returns unless duplicated, class instances must extend `RpcTarget` to cross by reference, and property reads on stubs are remote calls. sandestin chooses the other end of each of those:
 
@@ -347,7 +348,7 @@ Pick Cap'n Web when you want RPC with pipelining and a capability discipline acr
 
 ## Status
 
-0.3.0, shaped by porting post-robot's serialization layer onto it. The surface is small on purpose and is expected to hold; the layer that adds `send`/`on` style messaging and connect-by-URL will be a separate package that depends on this one.
+0.4.0. The 0.4 change moved every type beyond plain JSON out of the core and behind an import, so a bundle pays for `Date` or typed arrays only when it lists them; the core is about 9 kB minified. The surface is small on purpose and is expected to hold; the layer that adds `send`/`on` style messaging and connect-by-URL will be a separate package that depends on this one.
 
 ## License
 

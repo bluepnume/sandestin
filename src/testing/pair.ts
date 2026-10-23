@@ -6,7 +6,7 @@ export type PairContext = {
     readonly from : 'a' | 'b',
 };
 
-type Inherited = 'authorizeInboundRequest' | 'includeStacks' | 'types' | 'callTimeout';
+type Inherited = 'authorizeInboundRequest' | 'includeStacks' | 'types';
 
 export type PairOptions = Pick<SandestinOptions<PairContext>, Inherited> & {
     // Where a refused release ends up. A real transport would drop it on the

@@ -1,6 +1,6 @@
 import type { CustomType, Ref, Remote } from '../src';
 
-import { ref } from '../src';
+import { dateType, ref } from '../src';
 
 import { pair } from './helpers';
 
@@ -63,7 +63,7 @@ describe('custom by-value types', () => {
         expect(await remote.balance()).toBe(42);
     });
 
-    it('are tested before the built-ins, so a built-in can be overridden', () => {
+    it('are tried in the order given, so the first match wins', () => {
         const dateAsNumber : CustomType<Date, number> = {
             name:   'epoch',
             test:   value => value instanceof Date,
@@ -71,7 +71,7 @@ describe('custom by-value types', () => {
             decode: ({ value }) => new Date(value)
         };
 
-        const [ a, b ] = pair({ types: [ dateAsNumber ] });
+        const [ a, b ] = pair({ types: [ dateAsNumber, dateType ] });
         const text = a.encodeJSON({ value: new Date(1234) });
 
         expect(JSON.parse(text)).toEqual({ $type: 'epoch', $value: 1234 });

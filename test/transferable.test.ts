@@ -1,8 +1,10 @@
+import { bytesType, isNative, messagePortType, native } from '../src';
+
 import { pair } from './helpers';
 
 describe('transferable encode', () => {
     it('leaves buffers native and lists them for postMessage', () => {
-        const [ a ] = pair();
+        const [ a ] = pair({ types: [ bytesType, messagePortType ] });
         const buffer = new Uint8Array([ 1, 2, 3 ]).buffer;
         const view = new Float32Array([ 1.5 ]);
 
@@ -16,7 +18,7 @@ describe('transferable encode', () => {
     });
 
     it('decodes what structuredClone delivers from a transferable wire', () => {
-        const [ a, b ] = pair();
+        const [ a, b ] = pair({ types: [ bytesType, messagePortType ] });
         const value = { bytes: new Uint8Array([ 9, 8 ]), when: new Date(5) };
         const { wire } = a.encode({ value, transferable: true });
         const result = b.decode<{ bytes : Uint8Array, when : Date }>({ wire: structuredClone(wire) });
@@ -26,7 +28,7 @@ describe('transferable encode', () => {
     });
 
     it('carries a MessagePort, and refuses one without transferable', () => {
-        const [ a ] = pair();
+        const [ a ] = pair({ types: [ bytesType, messagePortType ] });
         const { port1, port2 } = new MessageChannel();
 
         try {
@@ -42,7 +44,7 @@ describe('transferable encode', () => {
     });
 
     it('still moves functions and promises as handles alongside transferables', async () => {
-        const [ a, b ] = pair();
+        const [ a, b ] = pair({ types: [ bytesType, messagePortType ] });
         const { wire } = a.encode({ value: { buf: new ArrayBuffer(4), fn: () => 'ok' }, transferable: true });
         const result = b.decode<{ buf : ArrayBuffer, fn : () => string }>({ wire });
 
@@ -51,9 +53,33 @@ describe('transferable encode', () => {
     });
 
     it('is a plain encode when transferable is not requested', () => {
-        const [ a ] = pair();
+        const [ a ] = pair({ types: [ bytesType, messagePortType ] });
         const wire = a.encode({ value: new Uint8Array([ 1 ]) });
 
         expect(wire).toEqual({ $type: 'bytes', $value: { kind: 'Uint8Array', base64: 'AQ==' } });
+    });
+});
+
+describe('native values', () => {
+    it('are refused by a plain encode, since text cannot carry them', () => {
+        const [ a ] = pair({
+            types: [ {
+                name:   'raw',
+                test:   (value : unknown) => typeof value === 'object' && value !== null && 'raw' in value,
+                encode: ({ value }) => native({ value }),
+                decode: ({ value }) => value
+            } ]
+        });
+
+        expect(() => a.encode({ value: { raw: true } })).toThrow('transferable: true');
+        expect(a.encode({ value: { raw: true }, transferable: true }).wire).toEqual({ raw: true });
+        expect(isNative(native({ value: 1 }))).toBe(true);
+        expect(isNative({ value: 1 })).toBe(false);
+    });
+});
+
+describe('bytesType', () => {
+    it('refuses to encode something that is not bytes', () => {
+        expect(() => bytesType.encode({ value: `nope` as never, context: undefined, transferable: false })).toThrow(`typed array`);
     });
 });

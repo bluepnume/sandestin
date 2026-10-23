@@ -1,9 +1,11 @@
+import { builtinTypes } from '../src';
+
 import { pair } from './helpers';
 
 // Round-trips a value through side a's encoder and side b's decoder, via the
 // string form so every test proves the wire is plain JSON.
 const roundTrip = (value : unknown) : unknown => {
-    const [ a, b ] = pair();
+    const [ a, b ] = pair({ types: builtinTypes });
 
     return b.decodeJSON({ text: a.encodeJSON({ value }) });
 };
@@ -114,7 +116,7 @@ describe('plain values survive a round trip', () => {
 
 describe('the wire', () => {
     it('is plain JSON-safe data that structuredClone also carries unchanged', () => {
-        const [ a, b ] = pair();
+        const [ a, b ] = pair({ types: builtinTypes });
         const value = { when: new Date(0), tag: /x/, nested: { list: [ 1, 2 ] }, map: new Map([ [ 1, 2 ] ]) };
         const wire = a.encode({ value });
 
@@ -123,12 +125,23 @@ describe('the wire', () => {
     });
 
     it('uses one record shape for every special value', () => {
-        const [ a ] = pair();
+        const [ a ] = pair({ types: builtinTypes });
 
         expect(JSON.parse(a.encodeJSON({ value: { when: new Date(0), tag: /x/ } }))).toEqual({
             when: { $type: 'date', $value: '1970-01-01T00:00:00.000Z' },
             tag:  { $type: 'regexp', $value: { source: 'x', flags: '' } }
         });
+    });
+
+    it('without dateType registered, a Date is whatever the transport makes of it', () => {
+        const [ a, b ] = pair();
+
+        // Passed through untouched: JSON's own toJSON turns it into text,
+        // structured clone would keep it a Date.
+        expect(b.decodeJSON({ text: a.encodeJSON({ value: { when: new Date(0) } }) })).toEqual({ when: `1970-01-01T00:00:00.000Z` });
+        const cloned = structuredClone(a.encode({ value: { when: new Date(0) } }));
+
+        expect(b.decode({ wire: cloned })).toEqual({ when: new Date(0) });
     });
 
     it('passes a class instance through, which loses its prototype in transit', () => {
@@ -150,7 +163,7 @@ describe('the wire', () => {
     });
 
     it('rejects an unknown bytes kind on decode', () => {
-        const [ , b ] = pair();
+        const [ , b ] = pair({ types: builtinTypes });
 
         expect(() => b.decodeJSON({ text: JSON.stringify({ $type: 'bytes', $value: { kind: 'Nope', base64: '' } }) }))
             .toThrow(/Unknown bytes kind/);

@@ -3,7 +3,7 @@ import type { Outcome, Sandestin, SandestinOptions } from '../../src';
 // The smallest message protocol that carries the three inbound methods over a
 // channel. Shared by the worker, child-process and browser transport tests;
 // each one only supplies `post` and feeds `receive`.
-import { sandestin } from '../../src';
+import { dateType, sandestin } from '../../src';
 
 export type Envelope =
     | { readonly type : 'value', readonly wire : unknown }
@@ -40,6 +40,7 @@ export const createPeer = ({ channel, post, onValue, authorizeInboundRequest } :
 
     const serdes = sandestin<PeerContext>({
         authorizeInboundRequest,
+        types: [ dateType ],
 
         invokeRemoteFunction: ({ handle, args }) => new Promise(resolve => {
             const id = nextId;

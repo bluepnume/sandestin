@@ -1,6 +1,6 @@
 {
     "$schema": "https://unpkg.com/knip@latest/schema.json",
-    "entry": [ "src/index.ts", "src/testing/index.ts", "test/**/*.test.ts", "test/transports/*-side.ts" ],
+    "entry": [ "src/index.ts", "src/builtins/index.ts", "src/testing/index.ts", "test/**/*.test.ts", "test/transports/*-side.ts" ],
     "project": [ "src/**/*.ts", "test/**/*.ts" ],
     "exclude": [ "enumMembers", "duplicates", "binaries" ],
     "ignoreExportsUsedInFile": true

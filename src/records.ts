@@ -10,12 +10,6 @@ export const RECORD_TYPE = {
     ERROR:     'error',
     ESCAPED:   'escaped',
     UNDEFINED: 'undefined',
-    DATE:      'date',
-    REGEXP:    'regexp',
-    MAP:       'map',
-    SET:       'set',
-    BIGINT:    'bigint',
-    BYTES:     'bytes',
     // A second occurrence of a container already emitted: cycles and shared
     // references.
     REF:       'ref',
@@ -79,68 +73,3 @@ export const isPlainObject = (value : unknown) : value is Record<string, unknown
 
     return proto === Object.prototype || proto === null;
 };
-
-type BytesKind =
-    | 'ArrayBuffer' | 'Uint8Array' | 'Uint8ClampedArray' | 'Int8Array' | 'Uint16Array' | 'Int16Array'
-    | 'Uint32Array' | 'Int32Array' | 'Float32Array' | 'Float64Array';
-
-type ViewKind = Exclude<BytesKind, 'ArrayBuffer'>;
-
-const VIEW_CONSTRUCTORS : Readonly<Record<ViewKind, new (buffer : ArrayBuffer) => ArrayBufferView>> = {
-    Uint8Array,
-    Uint8ClampedArray,
-    Int8Array,
-    Uint16Array,
-    Int16Array,
-    Uint32Array,
-    Int32Array,
-    Float32Array,
-    Float64Array
-};
-
-const isViewKind = (kind : string) : kind is ViewKind => Object.hasOwn(VIEW_CONSTRUCTORS, kind);
-
-export type Bytes = {
-    readonly kind : BytesKind,
-    readonly bytes : Uint8Array,
-    // The buffer a transferable encode would hand to postMessage.
-    readonly buffer : ArrayBuffer,
-};
-
-// Recognises the binary values carried as base64, as a kind plus a byte view
-// over exactly the bytes they cover.
-export const bytesOf = (value : unknown) : Bytes | undefined => {
-    if (value instanceof ArrayBuffer) {
-        return { kind: 'ArrayBuffer', bytes: new Uint8Array(value), buffer: value };
-    }
-
-    if (!ArrayBuffer.isView(value) || value instanceof DataView || !(value.buffer instanceof ArrayBuffer)) {
-        return undefined;
-    }
-
-    const kind = value.constructor.name;
-
-    return isViewKind(kind)
-        ? { kind, bytes: new Uint8Array(value.buffer, value.byteOffset, value.byteLength), buffer: value.buffer }
-        : undefined;
-};
-
-export const bytesFromKind = ({ kind, bytes } : Pick<Bytes, 'kind' | 'bytes'>) : ArrayBuffer | ArrayBufferView => {
-    const buffer = new ArrayBuffer(bytes.byteLength);
-
-    new Uint8Array(buffer).set(bytes);
-
-    if (kind === 'ArrayBuffer') {
-        return buffer;
-    }
-
-    if (!isViewKind(kind)) {
-        throw new TypeError(`Unknown bytes kind: ${ String(kind) }`);
-    }
-
-    return new VIEW_CONSTRUCTORS[kind](buffer);
-};
-
-// A MessagePort can only cross as a transferable; there is no text form.
-export const isMessagePort = (value : unknown) : value is MessagePort =>
-    typeof MessagePort !== 'undefined' && value instanceof MessagePort;

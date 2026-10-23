@@ -93,27 +93,12 @@ const abortable = <Result>({ promise, signal } : AbortableOptions<Result>) : Pro
     });
 };
 
-type CombineSignalsOptions = { readonly signals : ReadonlyArray<AbortSignal | undefined> };
-
-const combineSignals = ({ signals } : CombineSignalsOptions) : AbortSignal | undefined => {
-    const present = signals.filter((signal) : signal is AbortSignal => signal !== undefined);
-
-    if (present.length === 0) {
-        return undefined;
-    }
-
-    return present.length === 1
-        ? present[0]
-        : AbortSignal.any(present);
-};
-
 export const sandestin = <Context = unknown>({
     invokeRemoteFunction,
     releaseRemoteHandle,
     watchRemotePromise,
     authorizeInboundRequest = () => true,
     types = [],
-    callTimeout,
     includeStacks = false
 } : SandestinOptions<Context>) : Sandestin<Context> => {
     // The option is typed loosely so any CustomType<Value, Wire> fits; the
@@ -246,24 +231,15 @@ export const sandestin = <Context = unknown>({
                     throw new ReleasedError({ handle, name });
                 }
 
-                const combined = combineSignals({
-                    signals: [
-                        signal,
-                        callTimeout === undefined
-                            ? undefined
-                            : AbortSignal.timeout(callTimeout)
-                    ]
-                });
-
                 const encodedArgs = core.encodeIn({ value: args, transferable: false, context }).wire;
 
-                if (combined?.aborted) {
-                    throw abortReason({ signal: combined });
+                if (signal?.aborted) {
+                    throw abortReason({ signal });
                 }
 
                 const outcome = await abortable({
-                    promise: invokeRemoteFunction({ handle, args: encodedArgs, signal: combined, reply, context }),
-                    signal:  combined
+                    promise: invokeRemoteFunction({ handle, args: encodedArgs, signal, reply, context }),
+                    signal
                 });
 
                 // Fire and forget: whatever came back, if anything, is dropped.

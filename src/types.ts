@@ -68,9 +68,6 @@ export type SandestinOptions<Context> = {
     readonly authorizeInboundRequest ?: AuthorizeInboundRequest<Context>,
     // Types of your own, tested before the built-ins.
     readonly types ?: ReadonlyArray<CustomTypeLike>,
-    // Reject any ref call that has not answered within this many milliseconds.
-    // Absent means wait forever.
-    readonly callTimeout ?: number,
     // Include `stack` in encoded errors. Off by default: a stack is the
     // owner's business, not something to hand across an origin.
     readonly includeStacks ?: boolean,
@@ -84,9 +81,9 @@ export type EncodeOptions<Context> = {
 };
 
 export type TransferableEncodeOptions<Context> = EncodeOptions<Context> & {
-    // Leave ArrayBuffers, typed arrays and MessagePorts native and list what to
-    // hand to postMessage as transferables. Only for structured-clone
-    // transports: a text transport cannot carry what this leaves native.
+    // Let custom types (the bytes and MessagePort ones from `sandestin/types`,
+    // or your own) leave values native and list what to hand to postMessage as
+    // transferables. Only for structured-clone transports.
     readonly transferable : true,
 };
 

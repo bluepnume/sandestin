@@ -1,9 +1,19 @@
+import type { Native } from './native';
+
 import { BUILT_IN_RECORD_TYPES } from './records';
 
 export type CustomTypeEncodeOptions<Value, Context = unknown> = {
     readonly value : Value,
     // The context of the encode this value is part of: the one given to
     // `encode`, or inherited from the handle a call or outcome belongs to.
+    readonly context : Context | undefined,
+    // True when the caller asked for `{ wire, transfer }`: the type may then
+    // return `native(...)` to leave a value as is and list what to transfer.
+    readonly transferable : boolean,
+};
+
+export type CustomTypeReleaseOptions<Value, Context = unknown> = {
+    readonly value : Value,
     readonly context : Context | undefined,
 };
 
@@ -20,9 +30,9 @@ export type CustomType<Value = unknown, Wire = unknown, Context = unknown> = {
     // The record tag on the wire; must not collide with the built-in ones.
     readonly name : string,
     readonly test : (value : unknown) => boolean,
-    readonly encode : (options : CustomTypeEncodeOptions<Value, Context>) => Wire,
+    readonly encode : (options : CustomTypeEncodeOptions<Value, Context>) => Wire | Native,
     readonly decode : (options : CustomTypeDecodeOptions<Wire, Context>) => Value,
-    readonly release ?: (options : CustomTypeEncodeOptions<Value, Context>) => void,
+    readonly release ?: (options : CustomTypeReleaseOptions<Value, Context>) => void,
 };
 
 // The shape `types` accepts: any CustomType<Value, Wire>, whatever Value and
@@ -32,7 +42,7 @@ export type CustomTypeLike = {
     readonly test : (value : unknown) => boolean,
     readonly encode : (options : CustomTypeEncodeOptions<never, never>) => unknown,
     readonly decode : (options : CustomTypeDecodeOptions<never, never>) => unknown,
-    readonly release ?: (options : CustomTypeEncodeOptions<never, never>) => void,
+    readonly release ?: (options : CustomTypeReleaseOptions<never, never>) => void,
 };
 
 export type ValidateCustomTypesOptions = {

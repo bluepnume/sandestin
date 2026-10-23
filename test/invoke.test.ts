@@ -69,37 +69,6 @@ describe('ref.invoke', () => {
         await expect(remote.invoke({ args: [], signal: AbortSignal.timeout(20) })).rejects.toMatchObject({ name: `TimeoutError` });
     });
 
-    it('applies the instance callTimeout to plain calls', async () => {
-        const [ a, b ] = pair({ callTimeout: 20 });
-
-        const never = () : Promise<never> => new Promise(() => {
-            // never settles
-        });
-
-        const quick = () : string => 'done';
-        const wire = a.encode({ value: { never, quick } });
-        const remote = b.decode<{ never : typeof never, quick : typeof quick }>({ wire });
-
-        await expect(remote.never()).rejects.toMatchObject({ name: 'TimeoutError' });
-        expect(await remote.quick()).toBe('done');
-    });
-
-    it('combines the instance timeout with a per-call signal', async () => {
-        const [ a, b ] = pair({ callTimeout: 10_000 });
-
-        const never = () : Promise<never> => new Promise(() => {
-            // never settles
-        });
-
-        const remote = b.decode<typeof never>({ wire: a.encode({ value: never }) });
-        const controller = new AbortController();
-        const pending = remote.invoke({ args: [], signal: controller.signal });
-
-        controller.abort(new Error('mine first'));
-
-        await expect(pending).rejects.toThrow('mine first');
-    });
-
     it('hands the signal to the transport hook', async () => {
         const seen : Array<InvokeRemoteFunctionOptions<unknown>> = [];
         const [ a ] = pair();
