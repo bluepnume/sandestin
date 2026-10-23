@@ -26,14 +26,14 @@ type Side = 'a' | 'b';
 const a = sandestin<Side>({
     authorizeInboundRequest: ({ context }) => context === 'b',
     invokeRemoteFunction:    ({ handle, args }) => b.invokeLocalFunction({ handle, args, context: 'a' }),
-    releaseRemoteHandle:     ({ handle }) => void b.releaseLocalHandle({ handle, context: 'a' }),
+    releaseRemoteHandle:     ({ handle, count }) => void b.releaseLocalHandle({ handle, context: 'a', count }),
     watchRemotePromise:      ({ handle }) => b.watchLocalPromise({ handle, context: 'a' })
 });
 
 const b = sandestin<Side>({
     authorizeInboundRequest: ({ context }) => context === 'a',
     invokeRemoteFunction:    ({ handle, args }) => a.invokeLocalFunction({ handle, args, context: 'b' }),
-    releaseRemoteHandle:     ({ handle }) => void a.releaseLocalHandle({ handle, context: 'b' }),
+    releaseRemoteHandle:     ({ handle, count }) => void a.releaseLocalHandle({ handle, context: 'b', count }),
     watchRemotePromise:      ({ handle }) => a.watchLocalPromise({ handle, context: 'b' })
 });
 
@@ -223,7 +223,7 @@ One instance per peer. The options are the outbound half: what this side needs d
 | Option | Called when | You should |
 | --- | --- | --- |
 | `invokeRemoteFunction({ handle, args, signal?, reply, context })` | A ref on this side is called | Deliver the call; resolve with the far side's `Outcome` (or nothing when `reply` is false); stop waiting if `signal` fires |
-| `releaseRemoteHandle({ handle, context })` | A ref is released, or collected | Tell the far side; no reply |
+| `releaseRemoteHandle({ handle, context, count })` | A ref is released, or collected | Tell the far side, passing `count` on; no reply |
 | `watchRemotePromise({ handle, context })` | A promise handle is decoded | Resolve with the far side's `Outcome`; reject if it cannot be had |
 | `authorizeInboundRequest({ handle, context, handleContext, target })` | Any inbound request arrives | Return `true` to allow; optional, default allows all |
 | `types` | Encoding and decoding | A list of `CustomType`s, shipped or your own; optional |
@@ -238,7 +238,7 @@ The returned instance has the inbound half, which your transport calls when a me
 | `decode<T>({ wire, context? })` | Wire to value, typed `Remote<T>`; handles become refs and promises |
 | `encodeJSON({ value, context? })` / `decodeJSON<T>({ text, context? })` | The same, as text |
 | `invokeLocalFunction({ handle, args, context })` | Run a function this side encoded; resolves with an `Outcome`, never throws |
-| `releaseLocalHandle({ handle, context })` | The other side let go; fires that function's `onRelease` |
+| `releaseLocalHandle({ handle, context, count })` | The other side let go of `count` sends; once none is left, fires that function's `onRelease` |
 | `watchLocalPromise({ handle, context })` | Resolves with a promise's `Outcome` when known; rejects if refused or unknown |
 | `hasHandle({ handle })` | Whether this side still holds what the handle names |
 | `liveHandleCount()` | Handles this side still holds for the other |
@@ -292,7 +292,7 @@ export const connect = ({ target, origin, onValue }) => {
             post({ type: 'invoke', id, handle, args });
         }),
 
-        releaseRemoteHandle: ({ handle }) => post({ type: 'release', handle }),
+        releaseRemoteHandle: ({ handle, count }) => post({ type: 'release', handle, count }),
 
         watchRemotePromise: ({ handle }) => new Promise(resolve => {
             watchers.set(handle, resolve);
@@ -312,7 +312,7 @@ export const connect = ({ target, origin, onValue }) => {
             case 'value':   onValue(peer.decode({ wire: message.wire })); break;
             case 'invoke':  post({ type: 'result', id: message.id, outcome: await peer.invokeLocalFunction({ handle: message.handle, args: message.args, context }) }); break;
             case 'result':  pending.get(message.id)?.(message.outcome); pending.delete(message.id); break;
-            case 'release': peer.releaseLocalHandle({ handle: message.handle, context }); break;
+            case 'release': peer.releaseLocalHandle({ handle: message.handle, context, count: message.count }); break;
             case 'watch':   post({ type: 'settle', handle: message.handle, outcome: await peer.watchLocalPromise({ handle: message.handle, context }) }); break;
             case 'settle':  watchers.get(message.handle)?.(message.outcome); watchers.delete(message.handle); break;
         }

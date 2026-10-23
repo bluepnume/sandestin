@@ -11,6 +11,8 @@ type FunctionEntry<Context> = {
     readonly options : RefOptions<Context>,
     // The context it was encoded under: who it was handed to.
     readonly context : Context | undefined,
+    // How many times it has been sent and not yet released.
+    sent : number,
 };
 
 type PromiseEntry<Context> = {
@@ -25,6 +27,11 @@ type PromiseEntry<Context> = {
 };
 
 type TableEntry<Context> = FunctionEntry<Context> | PromiseEntry<Context>;
+
+type ReleaseOptions = {
+    readonly handle : Handle,
+    readonly count ?: number,
+};
 
 type WatchOptions = {
     readonly handle : Handle,
@@ -68,7 +75,7 @@ type Table<Context> = {
     readonly registerPromise : (options : RegisterPromiseOptions<Context>) => RegisteredPromise,
     readonly registerGroup : (group : HandleGroup) => void,
     readonly get : (options : { readonly handle : Handle }) => TableEntry<Context> | undefined,
-    readonly release : (options : { readonly handle : Handle }) => void,
+    readonly release : (options : ReleaseOptions) => void,
     // The other side wants the outcome; delivered now if known, else when known.
     readonly watch : (options : WatchOptions) => void,
     // The promise settled; delivered to every watcher, now or when one arrives.
@@ -94,11 +101,21 @@ export const createTable = <Context>() : Table<Context> => {
         groupsByHandle.delete(handle);
     };
 
-    const release = ({ handle } : { readonly handle : Handle }) : void => {
+    // With a count, only that many sends of a function are released, and it
+    // stays while any other send is still out.
+    const release = ({ handle, count } : ReleaseOptions) : void => {
         const entry = entries.get(handle);
 
         if (!entry) {
             return;
+        }
+
+        if (count !== undefined && entry.kind === 'function') {
+            entry.sent -= count;
+
+            if (entry.sent > 0) {
+                return;
+            }
         }
 
         entries.delete(handle);
@@ -116,13 +133,21 @@ export const createTable = <Context>() : Table<Context> => {
     const registerFunction = ({ fn, context } : RegisterFunctionOptions<Context>) : Handle => {
         const existing = handlesByTarget.get(fn);
 
-        if (existing !== undefined) {
+        const existingEntry = existing === undefined
+            ? undefined
+            : entries.get(existing);
+
+        if (existing !== undefined && existingEntry?.kind === 'function') {
+            existingEntry.sent += 1;
+
             return existing;
         }
 
         const handle = crypto.randomUUID();
 
-        entries.set(handle, { kind: 'function', fn, options: getRefOptions({ fn }) as RefOptions<Context>, context });
+        const options = getRefOptions({ fn }) as RefOptions<Context>;
+
+        entries.set(handle, { kind: 'function', fn, options, context, sent: 1 });
         handlesByTarget.set(fn, handle);
         onRevoke({ fn, listener: () => release({ handle }) });
 

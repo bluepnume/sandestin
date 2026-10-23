@@ -136,4 +136,18 @@ describe('errors', () => {
         expect(new ReleasedError({ handle: 'h' }).message).toContain('h');
         expect(new UnauthorizedError({ handle: 'h' }).message).toContain('h');
     });
+
+    it('keeps the message and stack a released error had where it was thrown', async () => {
+        const [ a, b ] = pair({ includeStacks: true });
+        const stale = b.decode({ wire: a.encode({ value: () => 1 }) }) as Ref;
+        const { handle } = (b.encode({ value: stale }) as { $value : { handle : string } }).$value;
+
+        await a.releaseLocalHandle({ handle, context: { from: 'b' } });
+
+        const error = await stale().catch((err : unknown) => err) as ReleasedError;
+
+        expect(error.message).toContain(handle);
+        expect(error.stack).toContain(`ReleasedError: Handle ${ handle } has been released`);
+        expect(error.remoteStack).toContain(handle);
+    });
 });

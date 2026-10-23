@@ -39,6 +39,16 @@ type Holding<Context> = {
     readonly context : Context | undefined,
 };
 
+// A function handle this side holds: the proxy standing for it, the context
+// it arrived under, and how many times it has arrived.
+type HeldRef<Context> = {
+    readonly handle : Handle,
+    readonly context : Context | undefined,
+    received : number,
+    // Weak, so holding the handle does not keep the proxy alive.
+    ref ?: WeakRef<Ref>,
+};
+
 type Core<Context> = {
     readonly encodeIn : (options : EncodeInOptions<Context>) => TransferableEncoded,
     readonly decodeIn : (options : DecodeInOptions<Context>) => unknown,
@@ -109,23 +119,25 @@ export const sandestin = <Context = unknown>({
 
     const table = createTable<Context>();
 
-    // Holder side: handles this side has been given, and how to let go of each.
-    const heldReleasers = new Map<Handle, () => void>();
+    // Holder side: one live proxy per function handle this side has been
+    // given, and how many times the handle has arrived. The owner hands out
+    // the same handle each time it sends the same function, so every arrival
+    // returns the same proxy, and letting go reports every arrival: the
+    // owner frees the function only once nothing it sent is still in use.
+    const held = new Map<Handle, HeldRef<Context>>();
 
     // Holder side: the refs and remote promises this instance has made, with
     // the handle and context each came from. Sending one back names that
     // handle; calling one carries that context.
     const holdings = new WeakMap<object, Holding<Context>>();
-    const releasedHandles = new Set<Handle>();
 
     // The garbage-collection net: a proxy nobody references any more releases
-    // its handle on the far side, if nothing released it explicitly first.
-    const finalization = new FinalizationRegistry<Holding<Context>>(({ handle, context }) => {
-        if (releasedHandles.has(handle)) {
-            releasedHandles.delete(handle);
-        } else {
-            heldReleasers.delete(handle);
-            releaseRemoteHandle({ handle, context });
+    // its handle on the far side, unless it was released explicitly first or
+    // a newer proxy for the same handle has taken over its arrivals.
+    const finalization = new FinalizationRegistry<HeldRef<Context>>(holding => {
+        if (held.get(holding.handle) === holding) {
+            held.delete(holding.handle);
+            releaseRemoteHandle({ handle: holding.handle, context: holding.context, count: holding.received });
         }
     });
 
@@ -211,6 +223,23 @@ export const sandestin = <Context = unknown>({
         },
 
         createRef: ({ handle, name, context }) => {
+            const previous = held.get(handle);
+            const live = previous?.ref?.deref();
+
+            if (previous && live) {
+                previous.received += 1;
+
+                return live;
+            }
+
+            // A collected proxy whose finalizer has not run yet still counts:
+            // its arrivals carry over to the new one.
+            const holding : HeldRef<Context> = {
+                handle,
+                context,
+                received: (previous?.received ?? 0) + 1
+            };
+
             let released = false;
 
             const releaser = () : void => {
@@ -219,9 +248,11 @@ export const sandestin = <Context = unknown>({
                 }
 
                 released = true;
-                releasedHandles.add(handle);
-                heldReleasers.delete(handle);
-                releaseRemoteHandle({ handle, context });
+
+                if (held.get(handle) === holding) {
+                    held.delete(handle);
+                    releaseRemoteHandle({ handle, context, count: holding.received });
+                }
             };
 
             const invoke = async (
@@ -254,10 +285,11 @@ export const sandestin = <Context = unknown>({
 
             const proxyRef = Object.assign(proxy, { invoke, [ Symbol.dispose ]: releaser }) as Ref;
 
-            heldReleasers.set(handle, releaser);
+            holding.ref = new WeakRef(proxyRef);
+            held.set(handle, holding);
             holdings.set(proxyRef, { handle, context });
             registerRef({ proxy: proxyRef, releaser });
-            finalization.register(proxyRef, { handle, context });
+            finalization.register(proxyRef, holding);
 
             return proxyRef;
         },
@@ -389,9 +421,9 @@ export const sandestin = <Context = unknown>({
             }
         },
 
-        releaseLocalHandle: ({ handle, context }) => {
+        releaseLocalHandle: ({ handle, context, count }) => {
             return table.get({ handle })
-                ? settled(() => authorized({ handle, context, allowed: () => table.release({ handle }) }))
+                ? settled(() => authorized({ handle, context, allowed: () => table.release({ handle, count }) }))
                 : Promise.resolve();
         },
 
@@ -412,9 +444,17 @@ export const sandestin = <Context = unknown>({
             closed = true;
             table.close();
 
-            for (const releaser of heldReleasers.values()) {
-                releaser();
+            for (const holding of held.values()) {
+                const live = holding.ref?.deref();
+
+                if (live) {
+                    live[Symbol.dispose]();
+                } else {
+                    releaseRemoteHandle({ handle: holding.handle, context: holding.context, count: holding.received });
+                }
             }
+
+            held.clear();
         }
     };
 };

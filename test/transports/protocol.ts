@@ -9,7 +9,7 @@ export type Envelope =
     | { readonly type : 'value', readonly wire : unknown }
     | { readonly type : 'invoke', readonly id : number, readonly handle : string, readonly args : unknown }
     | { readonly type : 'result', readonly id : number, readonly outcome : Outcome }
-    | { readonly type : 'release', readonly handle : string }
+    | { readonly type : 'release', readonly handle : string, readonly count : number }
     | { readonly type : 'watch', readonly handle : string }
     | { readonly type : 'settle', readonly handle : string, readonly outcome : Outcome };
 
@@ -51,7 +51,7 @@ export const createPeer = ({ channel, post, onValue, authorizeInboundRequest } :
             post({ type: 'invoke', id, handle, args });
         }),
 
-        releaseRemoteHandle: ({ handle }) => post({ type: 'release', handle }),
+        releaseRemoteHandle: ({ handle, count }) => post({ type: 'release', handle, count }),
 
         watchRemotePromise: ({ handle }) => new Promise(resolve => {
             watchers.set(handle, resolve);
@@ -74,7 +74,9 @@ export const createPeer = ({ channel, post, onValue, authorizeInboundRequest } :
                 pending.delete(envelope.id);
                 break;
             case 'release':
-                void serdes.releaseLocalHandle({ handle: envelope.handle, context }).catch(() => undefined);
+                void serdes.releaseLocalHandle({ handle: envelope.handle, context, count: envelope.count })
+                    .catch(() => undefined);
+
                 break;
             case 'watch':
                 void serdes.watchLocalPromise({ handle: envelope.handle, context }).then(

@@ -39,6 +39,15 @@ export type HandleErrorOptions = {
     readonly name ?: string,
 };
 
+// The same error rebuilt from the wire: the message and stack it had where
+// it was thrown.
+type DecodedHandleErrorOptions = {
+    readonly message : string,
+    readonly stack ?: string,
+};
+
+type HandleErrorConstructorOptions = HandleErrorOptions | DecodedHandleErrorOptions;
+
 const describe = ({ handle, name } : HandleErrorOptions) : string => (name
     ? `Function ${ name } (${ handle })`
     : `Handle ${ handle }`);
@@ -46,15 +55,19 @@ const describe = ({ handle, name } : HandleErrorOptions) : string => (name
 // The handle no longer names anything: released, revoked, exhausted by
 // `once`, or never known to this side.
 export class ReleasedError extends RemoteError {
-    constructor(options : HandleErrorOptions) {
-        super({ name: 'ReleasedError', message: `${ describe(options) } has been released` });
+    constructor(options : HandleErrorConstructorOptions) {
+        super('message' in options
+            ? { name: 'ReleasedError', ...options }
+            : { name: 'ReleasedError', message: `${ describe(options) } has been released` });
     }
 }
 
 // The inbound gate said no. Deliberately says nothing about why.
 export class UnauthorizedError extends RemoteError {
-    constructor(options : HandleErrorOptions) {
-        super({ name: 'UnauthorizedError', message: `Not authorized to use ${ describe(options) }` });
+    constructor(options : HandleErrorConstructorOptions) {
+        super('message' in options
+            ? { name: 'UnauthorizedError', ...options }
+            : { name: 'UnauthorizedError', message: `Not authorized to use ${ describe(options) }` });
     }
 }
 /* eslint-enable unicorn/custom-error-definition */

@@ -36,8 +36,8 @@ const side = ({ other, from, options, onError } : SideOptions) : Sandestin<PairC
     ...options,
     invokeRemoteFunction: ({ handle, args }) => other().invokeLocalFunction({ handle, args, context: { from } }),
 
-    releaseRemoteHandle: ({ handle }) => {
-        void other().releaseLocalHandle({ handle, context: { from } }).catch(onError);
+    releaseRemoteHandle: ({ handle, count }) => {
+        void other().releaseLocalHandle({ handle, context: { from }, count }).catch(onError);
     },
 
     watchRemotePromise: ({ handle }) => other().watchLocalPromise({ handle, context: { from } })

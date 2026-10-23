@@ -51,4 +51,70 @@ describe('the garbage-collection net', () => {
         await waitFor({ check: () => releases.length === 1, timeout: 200 }).catch(() => undefined);
         expect(a.liveHandleCount()).toBe(0);
     });
+
+    it('keeps a function sent twice alive while either proxy is held', async () => {
+        const [ a, b ] = pair();
+        const fn = () : number => 1;
+        const first = a.encode({ value: fn });
+        const second = a.encode({ value: fn });
+
+        decodeAndDrop({ wire: first, serdes: b });
+        await waitFor({ check: () => false, timeout: 200 }).catch(() => undefined);
+
+        const held = b.decode({ wire: second }) as Ref;
+
+        expect(await held()).toBe(1);
+
+        held[Symbol.dispose]();
+        expect(a.liveHandleCount()).toBe(0);
+    });
+});
+
+describe('counted releases', () => {
+    it('gives back the same proxy each time one handle arrives', () => {
+        const [ a, b ] = pair();
+        const fn = () : number => 1;
+
+        expect(b.decode({ wire: a.encode({ value: fn }) })).toBe(b.decode({ wire: a.encode({ value: fn }) }));
+    });
+
+    it('keeps a function whose second send was still in flight when the first proxy was released', async () => {
+        const [ a, b ] = pair();
+        const fn = () : number => 1;
+        const first = b.decode({ wire: a.encode({ value: fn }) }) as Ref;
+        const inFlight = a.encode({ value: fn });
+
+        first[Symbol.dispose]();
+        expect(a.liveHandleCount()).toBe(1);
+
+        const second = b.decode({ wire: inFlight }) as Ref;
+
+        expect(await second()).toBe(1);
+
+        second[Symbol.dispose]();
+        expect(a.liveHandleCount()).toBe(0);
+    });
+
+    it('releases outright when no count is given', async () => {
+        const [ a ] = pair();
+        const fn = () : number => 1;
+        const wire = a.encode({ value: fn });
+
+        a.encode({ value: fn });
+
+        const { handle } = (wire as { $value : { handle : string } }).$value;
+
+        await a.releaseLocalHandle({ handle, context: { from: 'b' } });
+        expect(a.liveHandleCount()).toBe(0);
+    });
+
+    it('releases what it holds when closed', () => {
+        const [ a, b ] = pair();
+        const fn = () : number => 1;
+
+        b.decode({ wire: a.encode({ value: fn }) });
+        b.close();
+
+        expect(a.liveHandleCount()).toBe(0);
+    });
 });

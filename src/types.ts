@@ -33,6 +33,9 @@ export type InvokeRemoteFunctionOptions<Context> = {
 export type ReleaseRemoteHandleOptions<Context> = {
     readonly handle : Handle,
     readonly context : Context | undefined,
+    // How many times the handle arrived here. Pass it on to
+    // `releaseLocalHandle`, so a send still in flight keeps the function.
+    readonly count : number,
 };
 
 export type WatchRemotePromiseOptions<Context> = {
@@ -112,6 +115,9 @@ export type InvokeLocalFunctionOptions<Context> = {
 export type ReleaseLocalHandleOptions<Context> = {
     readonly handle : Handle,
     readonly context : Context,
+    // The `count` the other side's `releaseRemoteHandle` was given. Absent
+    // releases the handle outright, whatever is still in flight.
+    readonly count ?: number,
 };
 
 export type WatchLocalPromiseOptions<Context> = {

@@ -36,7 +36,7 @@ type EncodeWalkResult = {
     readonly transfer : ReadonlyArray<Transferable>,
 };
 
-const ERROR_OWN_KEYS = new Set([ 'name', 'message', 'stack', 'cause' ]);
+const ERROR_OWN_KEYS = new Set([ 'name', 'message', 'stack', 'cause', 'remoteStack' ]);
 
 type Walk = (value : unknown) => unknown;
 
@@ -266,7 +266,9 @@ type DecodeStep<Wire> = {
     readonly state : DecodeState,
 };
 
-const SPECIAL_ERRORS : Readonly<Record<string, (options : { readonly handle : string }) => RemoteError>> = {
+type SpecialErrorOptions = { readonly message : string, readonly stack ?: string };
+
+const SPECIAL_ERRORS : Readonly<Record<string, (options : SpecialErrorOptions) => RemoteError>> = {
     ReleasedError:     options => new ReleasedError(options),
     UnauthorizedError: options => new UnauthorizedError(options)
 };
@@ -285,9 +287,8 @@ const decodeError = ({ wire, state } : DecodeStep<EncodedError>) : RemoteError =
     const special = SPECIAL_ERRORS[wire.name];
 
     if (special) {
-        const error = special({ handle: '' });
+        const error = special({ message: wire.message, stack: wire.stack });
 
-        error.message = wire.message;
         Object.assign(error, properties);
 
         return error;
