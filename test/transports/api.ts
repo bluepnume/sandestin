@@ -12,6 +12,9 @@ export type Api = {
     readonly later : Promise<string>,
     readonly once : () => string,
     readonly subscribe : (listener : (event : string) => Promise<void>) => Promise<number>,
+    // A Date coming back from a call: the case a text transport must carry
+    // through the outcome, not just the initial value.
+    readonly stamp : () => Date,
     readonly nested : {
         readonly when : Date,
         readonly make : () => { readonly inner : () => string },
@@ -40,6 +43,8 @@ export const buildApi = ({ log } : BuildApiOptions) : Api => ({
 
         return 2;
     },
+
+    stamp: () => new Date('2026-06-01T12:00:00.000Z'),
 
     nested: {
         when: new Date('2026-01-01T00:00:00.000Z'),
@@ -78,6 +83,7 @@ export const exerciseApi = async ({ api } : ExerciseApiOptions) : Promise<Readon
         `subscribe=${ subscribed }`,
         `events=${ events.join(',') }`,
         `when=${ api.nested.when.toISOString() }`,
+        `stamp=${ (await api.stamp()).toISOString() }`,
         `inner=${ await made.inner() }`
     ];
 };
@@ -92,5 +98,6 @@ export const EXPECTED_RESULTS = [
     'subscribe=2',
     'events=tick,tock',
     'when=2026-01-01T00:00:00.000Z',
+    'stamp=2026-06-01T12:00:00.000Z',
     'inner=from inner'
 ];

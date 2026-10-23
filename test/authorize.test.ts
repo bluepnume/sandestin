@@ -26,11 +26,11 @@ describe('authorizeInboundRequest', () => {
             }
         });
 
-        const wire = a.encode({ value: fn }) as { $value : string };
+        const wire = a.encode({ value: fn }) as { $value : { handle : string } };
 
         await (b.decode({ wire }) as Ref)();
 
-        expect(seen).toEqual([ { handle: wire.$value, context: { from: 'b' }, target: fn } ]);
+        expect(seen).toEqual([ { handle: wire.$value.handle, context: { from: 'b' }, target: fn } ]);
     });
 
     it('refuses calls with UnauthorizedError when it returns false', async () => {
@@ -50,7 +50,7 @@ describe('authorizeInboundRequest', () => {
 
     it('gates releases and promise watches too', async () => {
         const [ a, b ] = pair({ authorizeInboundRequest: () => false });
-        const fnHandle = (a.encode({ value: () => 1 }) as { $value : string }).$value;
+        const fnHandle = (a.encode({ value: () => 1 }) as { $value : { handle : string } }).$value.handle;
         const promiseHandle = (a.encode({ value: Promise.resolve(1) }) as { $value : string }).$value;
 
         await expect(a.releaseLocalHandle({ handle: fnHandle, context: { from: `b` } })).rejects.toBeInstanceOf(UnauthorizedError);
@@ -60,7 +60,7 @@ describe('authorizeInboundRequest', () => {
             .rejects.toBeInstanceOf(UnauthorizedError);
 
         // The decoder on b still gets a promise; it just never settles.
-        const pending = b.decode({ wire: { $type: 'promise', $value: promiseHandle } }) as Promise<unknown>;
+        const pending = b.decode<Promise<unknown>>({ wire: { $type: 'promise', $value: promiseHandle } });
 
         expect(pending).toBeInstanceOf(Promise);
     });

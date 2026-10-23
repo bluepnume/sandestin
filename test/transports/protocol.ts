@@ -1,9 +1,9 @@
-import type { Outcome, Serdes, SerdesOptions } from '../../src';
+import type { Outcome, Sandestin, SandestinOptions } from '../../src';
 
 // The smallest message protocol that carries the three inbound methods over a
 // channel. Shared by the worker, child-process and browser transport tests;
 // each one only supplies `post` and feeds `receive`.
-import { createSerdes } from '../../src';
+import { sandestin } from '../../src';
 
 export type Envelope =
     | { readonly type : 'value', readonly wire : unknown }
@@ -23,23 +23,22 @@ export type PeerOptions = {
     // expected to stringify; the peer just hands over objects.
     readonly post : (envelope : Envelope) => void,
     readonly onValue : (value : unknown) => void,
-    readonly json ?: boolean,
-    readonly authorizeInboundRequest ?: SerdesOptions<PeerContext>['authorizeInboundRequest'],
+    readonly authorizeInboundRequest ?: SandestinOptions<PeerContext>['authorizeInboundRequest'],
 };
 
 export type Peer = {
-    readonly serdes : Serdes<PeerContext>,
+    readonly serdes : Sandestin<PeerContext>,
     readonly send : (value : unknown) => void,
     readonly receive : (envelope : Envelope) => void,
 };
 
-export const createPeer = ({ channel, post, onValue, json = false, authorizeInboundRequest } : PeerOptions) : Peer => {
+export const createPeer = ({ channel, post, onValue, authorizeInboundRequest } : PeerOptions) : Peer => {
     const pending = new Map<number, (outcome : Outcome) => void>();
     const watchers = new Map<string, (outcome : Outcome) => void>();
     let nextId = 0;
     const context : PeerContext = { channel };
 
-    const serdes = createSerdes<PeerContext>({
+    const serdes = sandestin<PeerContext>({
         authorizeInboundRequest,
 
         invokeRemoteFunction: ({ handle, args }) => new Promise(resolve => {
@@ -59,20 +58,10 @@ export const createPeer = ({ channel, post, onValue, json = false, authorizeInbo
         }
     });
 
-    // In JSON mode every wire inside an envelope is a string produced by
-    // encodeJSON; in clone mode it is the structured-cloneable object.
-    const encode = (value : unknown) : unknown => (json
-        ? serdes.encodeJSON({ value })
-        : serdes.encode({ value }));
-
-    const decode = (wire : unknown) : unknown => (json
-        ? serdes.decodeJSON({ text: wire as string })
-        : serdes.decode({ wire }));
-
     const receive = (envelope : Envelope) : void => {
         switch (envelope.type) {
             case 'value':
-                onValue(decode(envelope.wire));
+                onValue(serdes.decode({ wire: envelope.wire }));
                 break;
             case 'invoke':
                 void serdes.invokeLocalFunction({ handle: envelope.handle, args: envelope.args, context })
@@ -106,6 +95,6 @@ export const createPeer = ({ channel, post, onValue, json = false, authorizeInbo
     return {
         serdes,
         receive,
-        send: value => post({ type: 'value', wire: encode(value) })
+        send: value => post({ type: 'value', wire: serdes.encode({ value }) })
     };
 };

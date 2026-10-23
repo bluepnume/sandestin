@@ -1,3 +1,5 @@
+import type { CustomTypeLike } from './custom-types';
+
 // Any callable; the `Function` type is banned by the lint config.
 export type AnyFunction = (...args : never) => unknown;
 
@@ -5,8 +7,8 @@ export type AnyFunction = (...args : never) => unknown;
 // holding a handle is the only way to reach what it names.
 export type Handle = string;
 
-// What `encode` produces. Opaque to callers: structured-cloneable in the
-// default mode, and the input to `encodeJSON` for the string form.
+// What `encode` produces: JSON-safe plain data that structuredClone and
+// JSON.stringify both carry unchanged. Opaque to callers.
 export type Encoded = unknown;
 
 // How a call or a promise ended, with the value or error already encoded so a
@@ -18,6 +20,9 @@ export type Outcome =
 export type InvokeRemoteFunctionOptions = {
     readonly handle : Handle,
     readonly args : Encoded,
+    // Present when the caller gave up: the transport may stop waiting and may
+    // tell the far side. The ref has already rejected by then.
+    readonly signal ?: AbortSignal,
 };
 
 export type ReleaseRemoteHandleOptions = {
@@ -39,7 +44,7 @@ export type AuthorizeInboundRequestOptions<Context> = {
 export type AuthorizeInboundRequest<Context> =
     (options : AuthorizeInboundRequestOptions<Context>) => boolean | Promise<boolean>;
 
-export type SerdesOptions<Context> = {
+export type SandestinOptions<Context> = {
     // Outbound: carry a call for a function the other side owns, and resolve
     // with its outcome. The transport decides how.
     readonly invokeRemoteFunction : (options : InvokeRemoteFunctionOptions) => Promise<Outcome>,
@@ -51,9 +56,35 @@ export type SerdesOptions<Context> = {
     // `context` is whatever the transport attached; this package never reads
     // it. Absent means every request is allowed.
     readonly authorizeInboundRequest ?: AuthorizeInboundRequest<Context>,
+    // Types of your own, tested before the built-ins.
+    readonly types ?: ReadonlyArray<CustomTypeLike>,
+    // Reject any ref call that has not answered within this many milliseconds.
+    // Absent means wait forever.
+    readonly callTimeout ?: number,
     // Include `stack` in encoded errors. Off by default: a stack is the
     // owner's business, not something to hand across an origin.
     readonly includeStacks ?: boolean,
+};
+
+export type EncodeOptions = {
+    readonly value : unknown,
+};
+
+export type TransferableEncodeOptions = EncodeOptions & {
+    // Leave ArrayBuffers, typed arrays and MessagePorts native and list what to
+    // hand to postMessage as transferables. Only for structured-clone
+    // transports: a text transport cannot carry what this leaves native.
+    readonly transferable : true,
+};
+
+export type TransferableEncoded = {
+    readonly wire : Encoded,
+    readonly transfer : ReadonlyArray<Transferable>,
+};
+
+export type Encode = {
+    (options : EncodeOptions) : Encoded,
+    (options : TransferableEncodeOptions) : TransferableEncoded,
 };
 
 export type InvokeLocalFunctionOptions<Context> = {
@@ -73,11 +104,13 @@ export type WatchLocalPromiseOptions<Context> = {
     readonly context : Context,
 };
 
-export type Serdes<Context> = {
-    readonly encode : (options : { readonly value : unknown }) => Encoded,
-    readonly decode : (options : { readonly wire : Encoded }) => unknown,
+export type Sandestin<Context> = {
+    readonly encode : Encode,
+    // Returns `unknown` unless told the shape; `T` is the type the other side
+    // encoded and the result is its `Remote<T>` form.
+    readonly decode : <T = unknown>(options : { readonly wire : Encoded }) => Remote<T>,
     readonly encodeJSON : (options : { readonly value : unknown }) => string,
-    readonly decodeJSON : (options : { readonly text : string }) => unknown,
+    readonly decodeJSON : <T = unknown>(options : { readonly text : string }) => Remote<T>,
     // Inbound: the other side called a function this side encoded.
     readonly invokeLocalFunction : (options : InvokeLocalFunctionOptions<Context>) => Promise<Outcome>,
     // Inbound: the other side let go of a handle this side encoded.
@@ -90,12 +123,25 @@ export type Serdes<Context> = {
     readonly close : () => void,
 };
 
-// A function received from the other side: calls go across, results come
-// back as a promise. Disposable so `using` releases it.
-export type Ref<Args extends ReadonlyArray<unknown> = ReadonlyArray<unknown>, Result = unknown> =
-    ((...args : Args) => Promise<Result>) & { readonly [ Symbol.dispose ] : () => void };
+export type InvokeOptions<Args> = {
+    readonly args : Args,
+    // Stop waiting when this fires; the call rejects with its reason.
+    readonly signal ?: AbortSignal,
+};
 
-// What a value looks like after it has crossed: functions return promises,
+// A function received from the other side: calls go across, results come
+// back as a promise. `invoke` is the same call with a signal; `using`
+// releases it.
+export type Ref<Args extends ReadonlyArray<unknown> = ReadonlyArray<unknown>, Result = unknown> =
+    ((...args : Args) => Promise<Result>) & {
+        // A method, not a property, so that a `Ref<[], number>` is assignable
+        // to the bare `Ref` the same way its call signature is.
+        // eslint-disable-next-line @typescript-eslint/method-signature-style
+        invoke(options : InvokeOptions<Args>) : Promise<Result>,
+        readonly [ Symbol.dispose ] : () => void,
+    };
+
+// What a value looks like after it has crossed: functions become refs,
 // promises stay promises, everything else is itself. Apply it to the type the
 // other side encoded.
 export type Remote<T> =

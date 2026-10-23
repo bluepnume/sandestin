@@ -17,7 +17,6 @@ const log : Array<string> = [];
 
 const peer = createPeer({
     channel:                 'child',
-    json:                    true,
     post:                    envelope => send(JSON.stringify(envelope)),
     onValue:                 () => undefined,
     authorizeInboundRequest: ({ context }) => context.channel === 'child'

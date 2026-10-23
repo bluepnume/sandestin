@@ -110,11 +110,11 @@ describe('errors', () => {
     it('the package errors keep their class on the far side', async () => {
         const [ a, b ] = pair();
         const once = b.decode({ wire: a.encode({ value: () => 1 }) }) as Ref;
-        const handle = (a.encode({ value: () => 1 }) as { $value : string }).$value;
+        const handle = (a.encode({ value: () => 1 }) as { $value : { handle : string } }).$value.handle;
 
         await a.releaseLocalHandle({ handle, context: { from: 'b' } });
 
-        const stale = b.decode({ wire: { $type: 'function', $value: handle } }) as Ref;
+        const stale = b.decode({ wire: { $type: 'function', $value: { handle, name: 'stale' } } }) as Ref;
 
         await expect(stale()).rejects.toBeInstanceOf(ReleasedError);
         await expect(once()).resolves.toBe(1);

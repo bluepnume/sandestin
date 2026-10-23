@@ -1,28 +1,30 @@
-import type { Serdes, SerdesOptions } from '../types';
+import type { Sandestin, SandestinOptions } from '../types';
 
-import { createSerdes } from '../serdes';
+import { sandestin } from '../sandestin';
 
 export type PairContext = {
     readonly from : 'a' | 'b',
 };
 
-export type PairOptions = Pick<SerdesOptions<PairContext>, 'authorizeInboundRequest' | 'includeStacks'> & {
+type Inherited = 'authorizeInboundRequest' | 'includeStacks' | 'types' | 'callTimeout';
+
+export type PairOptions = Pick<SandestinOptions<PairContext>, Inherited> & {
     // Where a refused release or watch ends up. A real transport would drop
     // these on the floor too; the default does the same, visibly named.
     readonly onError ?: (err : unknown) => void,
 };
 
-export type Pair = readonly [ Serdes<PairContext>, Serdes<PairContext> ];
+export type Pair = readonly [ Sandestin<PairContext>, Sandestin<PairContext> ];
 
 const dropped = () : void => undefined;
 
 type Sides = {
-    readonly a : Serdes<PairContext>,
-    readonly b : Serdes<PairContext>,
+    readonly a : Sandestin<PairContext>,
+    readonly b : Sandestin<PairContext>,
 };
 
 type SideOptions = {
-    readonly other : () => Serdes<PairContext>,
+    readonly other : () => Sandestin<PairContext>,
     readonly from : 'a' | 'b',
     readonly options : Omit<PairOptions, 'onError'>,
     readonly onError : (err : unknown) => void,
@@ -30,7 +32,7 @@ type SideOptions = {
 
 // One side: every outbound hook calls the other side's matching inbound
 // method directly.
-const side = ({ other, from, options, onError } : SideOptions) : Serdes<PairContext> => createSerdes<PairContext>({
+const side = ({ other, from, options, onError } : SideOptions) : Sandestin<PairContext> => sandestin<PairContext>({
     ...options,
     invokeRemoteFunction: ({ handle, args }) => other().invokeLocalFunction({ handle, args, context: { from } }),
 

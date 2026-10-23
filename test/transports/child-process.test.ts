@@ -30,7 +30,6 @@ describe('a child process over IPC (JSON)', () => {
             const api = await new Promise<Remote<Api>>(resolve => {
                 const peer = createPeer({
                     channel:                 'parent',
-                    json:                    true,
                     post:                    envelope => child.send(JSON.stringify(envelope)),
                     onValue:                 value => resolve(value as Remote<Api>),
                     authorizeInboundRequest: ({ context }) => context.channel === 'parent'

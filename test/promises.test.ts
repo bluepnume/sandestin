@@ -36,7 +36,7 @@ describe('promises cross as handles', () => {
 
     it('an already settled promise still arrives as a promise', async () => {
         const [ a, b ] = pair();
-        const remote = b.decode({ wire: a.encode({ value: Promise.resolve({ list: [ 1 ] }) }) }) as Promise<unknown>;
+        const remote = b.decode<Promise<unknown>>({ wire: a.encode({ value: Promise.resolve({ list: [ 1 ] }) }) });
 
         expect(remote).toBeInstanceOf(Promise);
         expect(await remote).toEqual({ list: [ 1 ] });
@@ -45,7 +45,7 @@ describe('promises cross as handles', () => {
     it('a rejection arrives as a RemoteError with the original name and message', async () => {
         const [ a, b ] = pair();
         const failure = new TypeError('bad input');
-        const remote = b.decode({ wire: a.encode({ value: Promise.reject(failure) }) }) as Promise<unknown>;
+        const remote = b.decode<Promise<unknown>>({ wire: a.encode({ value: Promise.reject(failure) }) });
 
         await expect(remote).rejects.toBeInstanceOf(RemoteError);
         await expect(remote).rejects.toMatchObject({ name: 'TypeError', message: 'bad input' });
@@ -55,7 +55,7 @@ describe('promises cross as handles', () => {
         const [ a, b ] = pair();
         // eslint-disable-next-line prefer-promise-reject-errors, @typescript-eslint/prefer-promise-reject-errors -- the point of the test
         const rejected = Promise.reject('nope');
-        const remote = b.decode({ wire: a.encode({ value: rejected }) }) as Promise<unknown>;
+        const remote = b.decode<Promise<unknown>>({ wire: a.encode({ value: rejected }) });
 
         await expect(remote).rejects.toBeInstanceOf(RemoteError);
         await expect(remote).rejects.toMatchObject({ message: 'nope', cause: 'nope' });
@@ -82,7 +82,7 @@ describe('promises cross as handles', () => {
 
     it('watching an unknown or non-promise handle is refused', async () => {
         const [ a ] = pair();
-        const fnHandle = (a.encode({ value: () => 1 }) as { $value : string }).$value;
+        const fnHandle = (a.encode({ value: () => 1 }) as { $value : { handle : string } }).$value.handle;
 
         await expect(a.watchLocalPromise({ handle: 'nope', listener: () => undefined, context: { from: 'b' } }))
             .rejects.toBeInstanceOf(ReleasedError);

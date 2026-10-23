@@ -1,3 +1,4 @@
+import type { HandleGroup } from './codec';
 import type { RefOptions } from './ref';
 import type { AnyFunction, Handle, Outcome } from './types';
 
@@ -34,14 +35,22 @@ type SettleOptions = {
     readonly outcome : Outcome,
 };
 
+// A custom-type value's handles, released as a group: the owner hears once
+// when the last of them goes.
+type Group = {
+    readonly pending : Set<Handle>,
+    readonly release : () => void,
+};
+
 // The owner side of a connection: everything this side has handed across and
-// still has to honour. One per Serdes instance; handles are random so holding
-// one is the only way to name what it points at.
+// still has to honour. One per instance; handles are random so holding one
+// is the only way to name what it points at.
 type Table<Context> = {
     readonly registerFunction : (options : { readonly fn : AnyFunction }) => Handle,
     // Returns the handle and whether it is new, so the caller can start
     // watching the promise exactly once.
     readonly registerPromise : (options : { readonly promise : Promise<unknown> }) => RegisteredPromise,
+    readonly registerGroup : (group : HandleGroup) => void,
     readonly get : (options : { readonly handle : Handle }) => TableEntry<Context> | undefined,
     readonly release : (options : { readonly handle : Handle }) => void,
     // The other side wants the outcome; delivered now if known, else when known.
@@ -55,6 +64,19 @@ type Table<Context> = {
 export const createTable = <Context>() : Table<Context> => {
     const entries = new Map<Handle, TableEntry<Context>>();
     const handlesByTarget = new WeakMap<object, Handle>();
+    const groupsByHandle = new Map<Handle, Set<Group>>();
+
+    const releaseFromGroups = ({ handle } : { readonly handle : Handle }) : void => {
+        for (const group of groupsByHandle.get(handle) ?? []) {
+            group.pending.delete(handle);
+
+            if (group.pending.size === 0) {
+                group.release();
+            }
+        }
+
+        groupsByHandle.delete(handle);
+    };
 
     const release = ({ handle } : { readonly handle : Handle }) : void => {
         const entry = entries.get(handle);
@@ -71,6 +93,8 @@ export const createTable = <Context>() : Table<Context> => {
         } else {
             handlesByTarget.delete(entry.promise);
         }
+
+        releaseFromGroups({ handle });
     };
 
     const registerFunction = ({ fn } : { readonly fn : AnyFunction }) : Handle => {
@@ -120,6 +144,25 @@ export const createTable = <Context>() : Table<Context> => {
         return { handle, fresh: true };
     };
 
+    const registerGroup = ({ handles, release: releaseGroup } : HandleGroup) : void => {
+        const live = handles.filter(handle => entries.has(handle));
+
+        if (live.length === 0) {
+            releaseGroup();
+
+            return;
+        }
+
+        const group : Group = { pending: new Set(live), release: releaseGroup };
+
+        for (const handle of live) {
+            const groups = groupsByHandle.get(handle) ?? new Set();
+
+            groups.add(group);
+            groupsByHandle.set(handle, groups);
+        }
+    };
+
     const watch = ({ handle, listener } : WatchOptions) : void => {
         const entry = entries.get(handle);
 
@@ -145,6 +188,7 @@ export const createTable = <Context>() : Table<Context> => {
     return {
         registerFunction,
         registerPromise,
+        registerGroup,
         get:  ({ handle }) => entries.get(handle),
         release,
         watch,

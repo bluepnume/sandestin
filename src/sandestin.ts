@@ -1,23 +1,31 @@
-import type { CodecMode } from './codec';
-import type { Encoded, Handle, Outcome, Ref, Serdes, SerdesOptions } from './types';
+import type { CustomType } from './custom-types';
+import type { EncodedFunction } from './records';
+import type {
+    Encode, Encoded, Handle, InvokeOptions, Outcome,
+    Ref, Remote, Sandestin, SandestinOptions, TransferableEncoded
+} from './types';
 
 import { decodeWalk, encodeWalk } from './codec';
+import { validateCustomTypes } from './custom-types';
 import { ReleasedError, RemoteError, UnauthorizedError } from './errors';
 import { registerRef } from './ref-registry';
 import { createTable } from './table';
-
-type ModeOptions<Payload> = Payload & { readonly mode : CodecMode };
 
 type AuthorizeOptions<Context> = {
     readonly handle : Handle,
     readonly context : Context,
 };
 
+type EncodeInOptions = {
+    readonly value : unknown,
+    readonly transferable : boolean,
+};
+
 type Core = {
-    readonly encodeIn : (options : ModeOptions<{ readonly value : unknown }>) => Encoded,
-    readonly decodeIn : (options : ModeOptions<{ readonly wire : Encoded }>) => unknown,
+    readonly encodeIn : (options : EncodeInOptions) => TransferableEncoded,
+    readonly decodeIn : (options : { readonly wire : Encoded }) => unknown,
     readonly settle : (options : { readonly outcome : Outcome }) => unknown,
-    readonly createRef : (options : { readonly handle : Handle }) => Ref,
+    readonly createRef : (options : EncodedFunction) => Ref,
     readonly createRemotePromise : (options : { readonly handle : Handle }) => Promise<unknown>,
     readonly trackPromise : (options : { readonly handle : Handle, readonly promise : Promise<unknown> }) => void,
 };
@@ -34,13 +42,71 @@ const settled = (step : () => void | Promise<void>) : Promise<void> => {
     }
 };
 
-export const createSerdes = <Context = unknown>({
+// A signal's reason as an Error, which it already is for timeouts and
+// plain aborts; anything else is wrapped so a catch always sees one.
+type AbortReasonOptions = { readonly signal : AbortSignal };
+
+const abortReason = ({ signal } : AbortReasonOptions) : Error => {
+    const reason : unknown = signal.reason;
+
+    return reason instanceof Error
+        ? reason
+        : new Error(String(reason));
+};
+
+// Rejects as soon as `signal` fires, otherwise settles with `promise`.
+type AbortableOptions<Result> = {
+    readonly promise : Promise<Result>,
+    readonly signal : AbortSignal | undefined,
+};
+
+const abortable = <Result>({ promise, signal } : AbortableOptions<Result>) : Promise<Result> => {
+    if (!signal) {
+        return promise;
+    }
+
+    if (signal.aborted) {
+        return Promise.reject(abortReason({ signal }));
+    }
+
+    return new Promise((resolve, reject) => {
+        const onAbort = () : void => reject(abortReason({ signal }));
+
+        signal.addEventListener('abort', onAbort, { once: true });
+
+        promise.then(resolve, reject).finally(() => signal.removeEventListener(`abort`, onAbort)).catch(() => undefined);
+    });
+};
+
+type CombineSignalsOptions = { readonly signals : ReadonlyArray<AbortSignal | undefined> };
+
+const combineSignals = ({ signals } : CombineSignalsOptions) : AbortSignal | undefined => {
+    const present = signals.filter((signal) : signal is AbortSignal => signal !== undefined);
+
+    if (present.length === 0) {
+        return undefined;
+    }
+
+    return present.length === 1
+        ? present[0]
+        : AbortSignal.any(present);
+};
+
+export const sandestin = <Context = unknown>({
     invokeRemoteFunction,
     releaseRemoteHandle,
     watchRemotePromise,
     authorizeInboundRequest = () => true,
+    types = [],
+    callTimeout,
     includeStacks = false
-} : SerdesOptions<Context>) : Serdes<Context> => {
+} : SandestinOptions<Context>) : Sandestin<Context> => {
+    // The option is typed loosely so any CustomType<Value, Wire> fits; the
+    // codec works with the erased form.
+    const customTypes = types as unknown as ReadonlyArray<CustomType>;
+
+    validateCustomTypes({ types: customTypes });
+
     const table = createTable<Context>();
 
     // Holder side: handles this side has been given, and how to let go of each.
@@ -63,11 +129,13 @@ export const createSerdes = <Context = unknown>({
     // The pieces that refer to each other, kept on one object so each can
     // reach the others without ordering games.
     const core : Core = {
-        encodeIn: ({ value, mode }) => encodeWalk({
+        encodeIn: ({ value, transferable }) => encodeWalk({
             value,
-            mode,
             includeStacks,
+            types:      customTypes,
+            transferable,
             onFunction: ({ fn }) => table.registerFunction({ fn }),
+            onGroup:    group => table.registerGroup(group),
 
             onPromise: ({ promise }) => {
                 const { handle, fresh } = table.registerPromise({ promise });
@@ -80,27 +148,27 @@ export const createSerdes = <Context = unknown>({
             }
         }),
 
-        decodeIn: ({ wire, mode }) => decodeWalk({
+        decodeIn: ({ wire }) => decodeWalk({
             wire,
-            mode,
-            onFunction: ({ handle }) => core.createRef({ handle }),
+            types:      customTypes,
+            onFunction: encoded => core.createRef(encoded),
             onPromise:  ({ handle }) => core.createRemotePromise({ handle })
         }),
 
         // What a ref or a remote promise does with an outcome.
         settle: ({ outcome }) => {
             if (outcome.ok) {
-                return core.decodeIn({ wire: outcome.value, mode: 'clone' });
+                return core.decodeIn({ wire: outcome.value });
             }
 
-            const error = core.decodeIn({ wire: outcome.error, mode: 'clone' });
+            const error = core.decodeIn({ wire: outcome.error });
 
             throw error instanceof Error
                 ? error
                 : new RemoteError({ name: 'Error', message: String(error), cause: error });
         },
 
-        createRef: ({ handle }) => {
+        createRef: ({ handle, name }) => {
             let released = false;
 
             const releaser = () : void => {
@@ -114,18 +182,39 @@ export const createSerdes = <Context = unknown>({
                 releaseRemoteHandle({ handle });
             };
 
-            const proxy = async (...args : ReadonlyArray<unknown>) : Promise<unknown> => {
+            const invoke = async ({ args, signal } : InvokeOptions<ReadonlyArray<unknown>>) : Promise<unknown> => {
                 if (released) {
-                    throw new ReleasedError({ handle });
+                    throw new ReleasedError({ handle, name });
                 }
 
-                const encodedArgs = core.encodeIn({ value: args, mode: 'clone' });
-                const outcome = await invokeRemoteFunction({ handle, args: encodedArgs });
+                const combined = combineSignals({
+                    signals: [
+                        signal,
+                        callTimeout === undefined
+                            ? undefined
+                            : AbortSignal.timeout(callTimeout)
+                    ]
+                });
+
+                const encodedArgs = core.encodeIn({ value: args, transferable: false }).wire;
+
+                if (combined?.aborted) {
+                    throw abortReason({ signal: combined });
+                }
+
+                const outcome = await abortable({
+                    promise: invokeRemoteFunction({ handle, args: encodedArgs, signal: combined }),
+                    signal:  combined
+                });
 
                 return core.settle({ outcome });
             };
 
-            const proxyRef = Object.assign(proxy, { [ Symbol.dispose ]: releaser }) as Ref;
+            const proxy = (...args : ReadonlyArray<unknown>) : Promise<unknown> => invoke({ args });
+
+            Object.defineProperty(proxy, 'name', { value: name });
+
+            const proxyRef = Object.assign(proxy, { invoke, [ Symbol.dispose ]: releaser }) as Ref;
 
             heldReleasers.set(handle, releaser);
             registerRef({ proxy: proxyRef, releaser });
@@ -152,10 +241,13 @@ export const createSerdes = <Context = unknown>({
 
         trackPromise: ({ handle, promise }) => {
             promise.then(
-                value => table.settle({ handle, outcome: { ok: true, value: core.encodeIn({ value, mode: `clone` }) } }),
+                value => table.settle({
+                    handle,
+                    outcome: { ok: true, value: core.encodeIn({ value, transferable: false }).wire }
+                }),
                 (err : unknown) => table.settle({
                     handle,
-                    outcome: { ok: false, error: core.encodeIn({ value: err, mode: 'clone' }) }
+                    outcome: { ok: false, error: core.encodeIn({ value: err, transferable: false }).wire }
                 })
             ).catch(() => {
                 // The promise had already been released; nothing to deliver to.
@@ -183,7 +275,12 @@ export const createSerdes = <Context = unknown>({
 
         const proceed = (ok : boolean) : Result => {
             if (!ok) {
-                throw new UnauthorizedError({ handle });
+                throw new UnauthorizedError({
+                    handle,
+                    name: entry.kind === 'function'
+                        ? entry.fn.name
+                        : undefined
+                });
             }
 
             return allowed();
@@ -196,34 +293,31 @@ export const createSerdes = <Context = unknown>({
 
     const assertOpen = () : void => {
         if (closed) {
-            throw new Error('This serdes instance has been closed');
+            throw new Error('This sandestin instance has been closed');
         }
     };
 
+    const encode = (({ value, transferable } : { readonly value : unknown, readonly transferable ?: true }) => {
+        assertOpen();
+
+        const result = core.encodeIn({ value, transferable: transferable === true });
+
+        return transferable === true
+            ? result
+            : result.wire;
+    }) as Encode;
+
+    const decode = <T>({ wire } : { readonly wire : Encoded }) : Remote<T> => {
+        assertOpen();
+
+        return core.decodeIn({ wire }) as Remote<T>;
+    };
+
     return {
-        encode: ({ value }) => {
-            assertOpen();
-
-            return core.encodeIn({ value, mode: 'clone' });
-        },
-
-        decode: ({ wire }) => {
-            assertOpen();
-
-            return core.decodeIn({ wire, mode: 'clone' });
-        },
-
-        encodeJSON: ({ value }) => {
-            assertOpen();
-
-            return JSON.stringify(core.encodeIn({ value, mode: 'json' }));
-        },
-
-        decodeJSON: ({ text }) => {
-            assertOpen();
-
-            return core.decodeIn({ wire: JSON.parse(text), mode: 'json' });
-        },
+        encode,
+        decode,
+        encodeJSON: ({ value }) => JSON.stringify(encode({ value })),
+        decodeJSON: ({ text }) => decode({ wire: JSON.parse(text) }),
 
         invokeLocalFunction: async ({ handle, args, context }) => {
             try {
@@ -235,10 +329,10 @@ export const createSerdes = <Context = unknown>({
                     throw new ReleasedError({ handle });
                 }
 
-                const decodedArgs = core.decodeIn({ wire: args, mode: 'clone' }) as ReadonlyArray<unknown>;
+                const decodedArgs = core.decodeIn({ wire: args }) as ReadonlyArray<unknown>;
 
                 if (entry.options.authorize && !await entry.options.authorize({ context, args: decodedArgs })) {
-                    throw new UnauthorizedError({ handle });
+                    throw new UnauthorizedError({ handle, name: entry.fn.name });
                 }
 
                 if (entry.options.once) {
@@ -248,9 +342,9 @@ export const createSerdes = <Context = unknown>({
                 const fn = entry.fn as (...args : ReadonlyArray<unknown>) => unknown;
                 const result : unknown = await fn(...decodedArgs);
 
-                return { ok: true, value: core.encodeIn({ value: result, mode: 'clone' }) };
+                return { ok: true, value: core.encodeIn({ value: result, transferable: false }).wire };
             } catch (err) {
-                return { ok: false, error: core.encodeIn({ value: err, mode: 'clone' }) };
+                return { ok: false, error: core.encodeIn({ value: err, transferable: false }).wire };
             }
         },
 

@@ -1,19 +1,36 @@
-import type { Bytes, EncodedError, TaggedRecord } from './records';
+import type { CustomType } from './custom-types';
+import type { Bytes, EncodedError, EncodedFunction, TaggedRecord } from './records';
 import type { AnyFunction, Handle } from './types';
 
 import { base64ToBytes, bytesToBase64 } from './base64';
 import { ReleasedError, RemoteError, UnauthorizedError } from './errors';
-import { bytesFromKind, bytesOf, isPlainObject, isRecord, needsEscaping, record, RECORD_TYPE } from './records';
+import {
+    bytesFromKind, bytesOf, isMessagePort, isPlainObject, isRecord,
+    needsEscaping, record, RECORD_TYPE
+} from './records';
 
-export type CodecMode = 'clone' | 'json';
+// Handles produced while encoding one custom-type value, so the owner can be
+// told once when the far side has let go of all of them.
+export type HandleGroup = {
+    readonly handles : ReadonlyArray<Handle>,
+    readonly release : () => void,
+};
 
 type EncodeWalkOptions = {
     readonly value : unknown,
-    readonly mode : CodecMode,
     readonly includeStacks : boolean,
+    readonly types : ReadonlyArray<CustomType>,
+    // Leave binary and ports native and collect them for postMessage.
+    readonly transferable : boolean,
     // Register a function or promise and get the handle that names it.
     readonly onFunction : (options : { readonly fn : AnyFunction }) => Handle,
     readonly onPromise : (options : { readonly promise : Promise<unknown> }) => Handle,
+    readonly onGroup : (group : HandleGroup) => void,
+};
+
+type EncodeWalkResult = {
+    readonly wire : unknown,
+    readonly transfer : ReadonlyArray<Transferable>,
 };
 
 const ERROR_OWN_KEYS = new Set([ 'name', 'message', 'stack', 'cause' ]);
@@ -23,15 +40,29 @@ type Walk = (value : unknown) => unknown;
 type EncodeState = Omit<EncodeWalkOptions, 'value'> & {
     // The recursive step, so helpers below can call back into the dispatcher.
     readonly walk : Walk,
-    // clone mode: input object -> output object, so cycles stay cycles.
-    readonly outputs : Map<object, unknown>,
-    // json mode: input object -> encounter index, so cycles become refs.
+    // The same walk, with one custom type left out at the top level only.
+    readonly walkSkipping : (options : { readonly value : unknown, readonly skip : CustomType }) => unknown,
+    // Input container -> encounter index, so cycles and shared references
+    // become `ref` records.
     readonly indexes : Map<object, number>,
+    readonly transfer : Array<Transferable>,
+    // Handle collectors for custom-type values currently being encoded.
+    readonly collectors : Array<Array<Handle>>,
 };
 
 type EncodeStep<Value> = {
     readonly value : Value,
     readonly state : EncodeState,
+};
+
+type CollectOptions = { readonly handle : Handle, readonly state : EncodeState };
+
+const collect = ({ handle, state } : CollectOptions) : Handle => {
+    for (const collector of state.collectors) {
+        collector.push(handle);
+    }
+
+    return handle;
 };
 
 const encodeError = ({ value, state } : EncodeStep<Error>) : TaggedRecord => {
@@ -58,37 +89,14 @@ const encodeError = ({ value, state } : EncodeStep<Error>) : TaggedRecord => {
     return record({ type: RECORD_TYPE.ERROR, value: encoded });
 };
 
-// Tracks a container in whichever way the mode needs.
-type RememberOptions = { readonly input : object, readonly output : unknown, readonly state : EncodeState };
-
-const remember = ({ input, output, state } : RememberOptions) : void => {
-    if (state.mode === 'clone') {
-        state.outputs.set(input, output);
-    } else {
-        state.indexes.set(input, state.indexes.size);
-    }
-};
-
-type Seen = { readonly hit : true, readonly value : unknown } | { readonly hit : false };
-
-const seen = ({ value, state } : EncodeStep<object>) : Seen => {
-    if (state.mode === 'clone') {
-        return state.outputs.has(value)
-            ? { hit: true, value: state.outputs.get(value) }
-            : { hit: false };
-    }
-
-    const index = state.indexes.get(value);
-
-    return index === undefined
-        ? { hit: false }
-        : { hit: true, value: record({ type: RECORD_TYPE.REF, value: index }) };
+const remember = ({ value, state } : EncodeStep<object>) : void => {
+    state.indexes.set(value, state.indexes.size);
 };
 
 const walkObject = ({ value, state } : EncodeStep<Record<string, unknown>>) : unknown => {
     const output : Record<string, unknown> = {};
 
-    remember({ input: value, output, state });
+    remember({ value, state });
 
     for (const key of Object.keys(value)) {
         output[key] = state.walk(value[key]);
@@ -102,7 +110,7 @@ const walkObject = ({ value, state } : EncodeStep<Record<string, unknown>>) : un
 const walkArray = ({ value, state } : EncodeStep<ReadonlyArray<unknown>>) : unknown => {
     const output : Array<unknown> = [];
 
-    remember({ input: value, output, state });
+    remember({ value, state });
 
     for (const element of value) {
         output.push(state.walk(element));
@@ -112,19 +120,7 @@ const walkArray = ({ value, state } : EncodeStep<ReadonlyArray<unknown>>) : unkn
 };
 
 const walkMap = ({ value, state } : EncodeStep<ReadonlyMap<unknown, unknown>>) : unknown => {
-    if (state.mode === 'clone') {
-        const output = new Map<unknown, unknown>();
-
-        remember({ input: value, output, state });
-
-        for (const [ key, entry ] of value) {
-            output.set(state.walk(key), state.walk(entry));
-        }
-
-        return output;
-    }
-
-    remember({ input: value, output: undefined, state });
+    remember({ value, state });
 
     const entries = [ ...value ].map(([ key, entry ]) => [ state.walk(key), state.walk(entry) ]);
 
@@ -132,27 +128,50 @@ const walkMap = ({ value, state } : EncodeStep<ReadonlyMap<unknown, unknown>>) :
 };
 
 const walkSet = ({ value, state } : EncodeStep<ReadonlySet<unknown>>) : unknown => {
-    if (state.mode === 'clone') {
-        const output = new Set<unknown>();
-
-        remember({ input: value, output, state });
-
-        for (const entry of value) {
-            output.add(state.walk(entry));
-        }
-
-        return output;
-    }
-
-    remember({ input: value, output: undefined, state });
+    remember({ value, state });
 
     return record({ type: RECORD_TYPE.SET, value: [ ...value ].map(entry => state.walk(entry)) });
 };
 
+const walkBytes = ({ value, bytes, state } : EncodeStep<unknown> & { readonly bytes : Bytes }) : unknown => {
+    if (state.transferable) {
+        state.transfer.push(bytes.buffer);
+
+        return value;
+    }
+
+    const encodedBytes = { kind: bytes.kind, base64: bytesToBase64({ bytes: bytes.bytes }) };
+
+    return record({ type: RECORD_TYPE.BYTES, value: encodedBytes });
+};
+
+const walkCustom = ({ value, type, state } : EncodeStep<unknown> & { readonly type : CustomType }) : unknown => {
+    const handles : Array<Handle> = [];
+
+    state.collectors.push(handles);
+
+    try {
+        // The encoded form is walked without this type, so an encoder whose
+        // output still passes its own test does not recurse into itself.
+        const wire = state.walkSkipping({ value: type.encode({ value }), skip: type });
+
+        if (type.release) {
+            const { release } = type;
+
+            // Nothing to hold means nothing to wait for: tell the owner now.
+            state.onGroup({ handles, release: () => release({ value }) });
+        }
+
+        return record({ type: type.name, value: wire });
+    } finally {
+        state.collectors.pop();
+    }
+};
+
 type Handled = { readonly handled : true, readonly output : unknown } | { readonly handled : false };
 
-// JSON mode only: things structured clone would have carried natively.
-const walkJsonOnly = ({ value } : EncodeStep<unknown>) : Handled => {
+// The platform values that have no JSON form of their own.
+const walkPlatform = ({ value, state } : EncodeStep<unknown>) : Handled => {
     if (value === undefined) {
         return { handled: true, output: record({ type: RECORD_TYPE.UNDEFINED, value: null }) };
     }
@@ -171,46 +190,62 @@ const walkJsonOnly = ({ value } : EncodeStep<unknown>) : Handled => {
         return { handled: true, output: record({ type: RECORD_TYPE.REGEXP, value: regexp }) };
     }
 
-    const bytes = bytesOf(value);
+    if (isMessagePort(value)) {
+        if (!state.transferable) {
+            throw new TypeError('A MessagePort can only be encoded with transferable: true');
+        }
 
-    if (bytes === undefined) {
-        return { handled: false };
+        state.transfer.push(value);
+
+        return { handled: true, output: value };
     }
 
-    const encodedBytes = { kind: bytes.kind, base64: bytesToBase64({ bytes: bytes.bytes }) };
+    const bytes = bytesOf(value);
 
-    return { handled: true, output: record({ type: RECORD_TYPE.BYTES, value: encodedBytes }) };
+    return bytes === undefined
+        ? { handled: false }
+        : { handled: true, output: walkBytes({ value, bytes, state }) };
 };
 
-const dispatch = ({ value, state } : EncodeStep<unknown>) : unknown => {
+const dispatch = ({ value, state, skip } : EncodeStep<unknown> & { readonly skip ?: CustomType }) : unknown => {
+    const custom = state.types.find(type => type !== skip && type.test(value));
+
+    if (custom) {
+        return walkCustom({ value, type: custom, state });
+    }
+
     if (typeof value === 'function') {
-        return record({ type: RECORD_TYPE.FUNCTION, value: state.onFunction({ fn: value as AnyFunction }) });
+        const fn = value as AnyFunction;
+        const handle = collect({ handle: state.onFunction({ fn }), state });
+        const encoded : EncodedFunction = { handle, name: fn.name };
+
+        return record({ type: RECORD_TYPE.FUNCTION, value: encoded });
     }
 
     if (value instanceof Promise) {
-        return record({ type: RECORD_TYPE.PROMISE, value: state.onPromise({ promise: value }) });
+        const handle = collect({ handle: state.onPromise({ promise: value }), state });
+
+        return record({ type: RECORD_TYPE.PROMISE, value: handle });
     }
 
     if (value instanceof Error) {
         return encodeError({ value, state });
     }
 
-    if (state.mode === 'json') {
-        const jsonOnly = walkJsonOnly({ value, state });
+    const platform = walkPlatform({ value, state });
 
-        if (jsonOnly.handled) {
-            return jsonOnly.output;
-        }
+    if (platform.handled) {
+        return platform.output;
     }
 
     if (typeof value !== 'object' || value === null) {
         return value;
     }
 
-    const previous = seen({ value, state });
+    const index = state.indexes.get(value);
 
-    if (previous.hit) {
-        return previous.value;
+    if (index !== undefined) {
+        return record({ type: RECORD_TYPE.REF, value: index });
     }
 
     if (Array.isArray(value)) {
@@ -225,35 +260,36 @@ const dispatch = ({ value, state } : EncodeStep<unknown>) : unknown => {
         return walkSet({ value, state });
     }
 
-    // Anything else (Date, RegExp, typed arrays, class instances) is left for
-    // structured clone to carry or reject on its own terms.
+    // Anything else (a class instance, say) is passed through and loses its
+    // prototype in transit; register a custom type to carry it properly.
     return isPlainObject(value)
         ? walkObject({ value, state })
         : value;
 };
 
-export const encodeWalk = ({ value, ...options } : EncodeWalkOptions) : unknown => {
+export const encodeWalk = ({ value, ...options } : EncodeWalkOptions) : EncodeWalkResult => {
     const state : EncodeState = {
         ...options,
-        walk:    input => dispatch({ value: input, state }),
-        outputs: new Map(),
-        indexes: new Map()
+        walk:         input => dispatch({ value: input, state }),
+        walkSkipping: ({ value: input, skip }) => dispatch({ value: input, state, skip }),
+        indexes:      new Map(),
+        transfer:     [],
+        collectors:   []
     };
 
-    return state.walk(value);
+    return { wire: state.walk(value), transfer: state.transfer };
 };
 
 type DecodeWalkOptions = {
     readonly wire : unknown,
-    readonly mode : CodecMode,
-    readonly onFunction : (options : { readonly handle : Handle }) => AnyFunction,
+    readonly types : ReadonlyArray<CustomType>,
+    readonly onFunction : (options : EncodedFunction) => AnyFunction,
     readonly onPromise : (options : { readonly handle : Handle }) => Promise<unknown>,
 };
 
 type DecodeState = Omit<DecodeWalkOptions, 'wire'> & {
     readonly walk : Walk,
-    readonly outputs : Map<object, unknown>,
-    // json mode: containers in encounter order, the targets of ref records.
+    // Containers in encounter order, the targets of ref records.
     readonly containers : Array<unknown>,
 };
 
@@ -292,20 +328,16 @@ const decodeError = ({ wire, state } : DecodeStep<EncodedError>) : RemoteError =
     return new RemoteError({ name: wire.name, message: wire.message, stack: wire.stack, cause, properties });
 };
 
-type TrackOptions = { readonly input : object, readonly output : unknown, readonly state : DecodeState };
+type TrackOptions = { readonly output : unknown, readonly state : DecodeState };
 
-const track = ({ input, output, state } : TrackOptions) : void => {
-    if (state.mode === 'clone') {
-        state.outputs.set(input, output);
-    } else {
-        state.containers.push(output);
-    }
+const track = ({ output, state } : TrackOptions) : void => {
+    state.containers.push(output);
 };
 
 const unwalkObject = ({ wire, state } : DecodeStep<Record<string, unknown>>) : unknown => {
     const output : Record<string, unknown> = {};
 
-    track({ input: wire, output, state });
+    track({ output, state });
 
     for (const key of Object.keys(wire)) {
         output[key] = state.walk(wire[key]);
@@ -317,7 +349,7 @@ const unwalkObject = ({ wire, state } : DecodeStep<Record<string, unknown>>) : u
 const unwalkArray = ({ wire, state } : DecodeStep<ReadonlyArray<unknown>>) : unknown => {
     const output : Array<unknown> = [];
 
-    track({ input: wire, output, state });
+    track({ output, state });
 
     for (const element of wire) {
         output.push(state.walk(element));
@@ -326,32 +358,26 @@ const unwalkArray = ({ wire, state } : DecodeStep<ReadonlyArray<unknown>>) : unk
     return output;
 };
 
-type UnwalkMapOptions = DecodeStep<object> & {
-    readonly entries : Iterable<readonly [ unknown, unknown ]>,
-};
+type WireEntries = ReadonlyArray<readonly [ unknown, unknown ]>;
 
-const unwalkMap = ({ wire, entries, state } : UnwalkMapOptions) : Map<unknown, unknown> => {
+const unwalkMap = ({ wire, state } : DecodeStep<WireEntries>) : Map<unknown, unknown> => {
     const output = new Map<unknown, unknown>();
 
-    track({ input: wire, output, state });
+    track({ output, state });
 
-    for (const [ key, entry ] of entries) {
+    for (const [ key, entry ] of wire) {
         output.set(state.walk(key), state.walk(entry));
     }
 
     return output;
 };
 
-type UnwalkSetOptions = DecodeStep<object> & {
-    readonly entries : Iterable<unknown>,
-};
-
-const unwalkSet = ({ wire, entries, state } : UnwalkSetOptions) : Set<unknown> => {
+const unwalkSet = ({ wire, state } : DecodeStep<ReadonlyArray<unknown>>) : Set<unknown> => {
     const output = new Set<unknown>();
 
-    track({ input: wire, output, state });
+    track({ output, state });
 
-    for (const entry of entries) {
+    for (const entry of wire) {
         output.add(state.walk(entry));
     }
 
@@ -360,10 +386,15 @@ const unwalkSet = ({ wire, entries, state } : UnwalkSetOptions) : Set<unknown> =
 
 const unwalkRecord = ({ wire, state } : DecodeStep<TaggedRecord>) : unknown => {
     const value = wire.$value;
+    const custom = state.types.find(type => type.name === wire.$type);
+
+    if (custom) {
+        return custom.decode({ value: state.walk(value) });
+    }
 
     switch (wire.$type) {
         case RECORD_TYPE.FUNCTION:
-            return state.onFunction({ handle: value as Handle });
+            return state.onFunction(value as EncodedFunction);
         case RECORD_TYPE.PROMISE:
             return state.onPromise({ handle: value as Handle });
         case RECORD_TYPE.ERROR:
@@ -388,13 +419,13 @@ const unwalkRecord = ({ wire, state } : DecodeStep<TaggedRecord>) : unknown => {
             return bytesFromKind({ kind, bytes: base64ToBytes({ text: base64 }) });
         }
         case RECORD_TYPE.MAP:
-            return unwalkMap({ wire, entries: value as ReadonlyArray<readonly [ unknown, unknown ]>, state });
+            return unwalkMap({ wire: value as ReadonlyArray<readonly [ unknown, unknown ]>, state });
         case RECORD_TYPE.SET:
-            return unwalkSet({ wire, entries: value as ReadonlyArray<unknown>, state });
+            return unwalkSet({ wire: value as ReadonlyArray<unknown>, state });
         case RECORD_TYPE.REF:
             return state.containers[value as number];
         default:
-            throw new TypeError(`Unknown record type: ${ String(wire.$type) }`);
+            throw new TypeError(`Unknown record type: ${ wire.$type }`);
     }
 };
 
@@ -407,22 +438,12 @@ const undispatch = ({ wire, state } : DecodeStep<unknown>) : unknown => {
         return unwalkRecord({ wire, state });
     }
 
-    if (state.mode === 'clone' && state.outputs.has(wire)) {
-        return state.outputs.get(wire);
-    }
-
     if (Array.isArray(wire)) {
         return unwalkArray({ wire, state });
     }
 
-    if (wire instanceof Map) {
-        return unwalkMap({ wire, entries: wire, state });
-    }
-
-    if (wire instanceof Set) {
-        return unwalkSet({ wire, entries: wire, state });
-    }
-
+    // Native binary and ports arrive only from a transferable encode over a
+    // structured-clone transport; they are already what they should be.
     return isPlainObject(wire)
         ? unwalkObject({ wire, state })
         : wire;
@@ -432,7 +453,6 @@ export const decodeWalk = ({ wire, ...options } : DecodeWalkOptions) : unknown =
     const state : DecodeState = {
         ...options,
         walk:       input => undispatch({ wire: input, state }),
-        outputs:    new Map(),
         containers: []
     };
 

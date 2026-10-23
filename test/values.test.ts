@@ -1,19 +1,14 @@
 import { pair } from './helpers';
 
-type Mode = 'clone' | 'json';
-
-// Round-trips a value through side a's encoder and side b's decoder.
-type RoundTripOptions = { readonly value : unknown, readonly mode : Mode };
-
-const roundTrip = ({ value, mode } : RoundTripOptions) : unknown => {
+// Round-trips a value through side a's encoder and side b's decoder, via the
+// string form so every test proves the wire is plain JSON.
+const roundTrip = (value : unknown) : unknown => {
     const [ a, b ] = pair();
 
-    return mode === 'clone'
-        ? b.decode({ wire: a.encode({ value }) })
-        : b.decodeJSON({ text: a.encodeJSON({ value }) });
+    return b.decodeJSON({ text: a.encodeJSON({ value }) });
 };
 
-describe.each([ 'clone', 'json' ] as const)('plain values survive a %s round trip', mode => {
+describe('plain values survive a round trip', () => {
     it.each([
         [ 'string', 'hello' ],
         [ 'number', 42 ],
@@ -24,25 +19,21 @@ describe.each([ 'clone', 'json' ] as const)('plain values survive a %s round tri
         [ 'empty object', {} ],
         [ 'empty array', [] ]
     ])('%s', (_, value) => {
-        expect(roundTrip({ value, mode })).toEqual(value);
+        expect(roundTrip(value)).toEqual(value);
     });
 
-    it('carries negative zero in clone mode and flattens it in JSON mode, as JSON itself does', () => {
-        const result = roundTrip({ value: -0, mode }) as number;
-
-        expect(Object.is(result, -0)).toBe(mode === 'clone');
+    it('flattens negative zero, as JSON does', () => {
+        expect(Object.is(roundTrip(-0), 0)).toBe(true);
     });
 
     it('keeps object key order', () => {
-        const value = { z: 1, a: 2, m: 3 };
-
-        expect(Object.keys(roundTrip({ value, mode }) as object)).toEqual([ 'z', 'a', 'm' ]);
+        expect(Object.keys(roundTrip({ z: 1, a: 2, m: 3 }) as object)).toEqual([ 'z', 'a', 'm' ]);
     });
 
     it('round-trips Date, Map, Set and undefined', () => {
         const date = new Date('2026-10-22T20:00:00.000Z');
         const value = { date, map: new Map([ [ 'k', { v: 1 } ] ]), set: new Set([ 1, 2 ]), gap: undefined };
-        const result = roundTrip({ value, mode }) as typeof value;
+        const result = roundTrip(value) as typeof value;
 
         expect(result.date).toBeInstanceOf(Date);
         expect(result.date.toISOString()).toBe(date.toISOString());
@@ -54,42 +45,6 @@ describe.each([ 'clone', 'json' ] as const)('plain values survive a %s round tri
         expect(result.gap).toBeUndefined();
     });
 
-    it('round-trips cycles and shared references', () => {
-        const shared = { name: 'shared' };
-        type Cyclic = { self ?: unknown, left : typeof shared, right : typeof shared, list : Array<unknown> };
-        const value : Cyclic = { left: shared, right: shared, list: [] };
-
-        value.self = value;
-        value.list.push(value.list);
-
-        const result = roundTrip({ value, mode }) as typeof value;
-
-        expect(result.self).toBe(result);
-        expect(result.left).toBe(result.right);
-        expect(result.left).toEqual({ name: 'shared' });
-        expect(result.list[0]).toBe(result.list);
-    });
-
-    it('escapes a user object that looks like a record', () => {
-        const value = { $type: 'function', $value: 'not a handle', extra: 1 };
-
-        expect(roundTrip({ value, mode })).toEqual(value);
-    });
-
-    it('escapes a nested record-looking object inside an array', () => {
-        const value = [ { $type: 'map', $value: [] } ];
-
-        expect(roundTrip({ value, mode })).toEqual(value);
-    });
-
-    it('passes values with a $type key but no $value through the escape too', () => {
-        const value = { $type: 'only' };
-
-        expect(roundTrip({ value, mode })).toEqual(value);
-    });
-});
-
-describe('json mode extras', () => {
     it('round-trips RegExp, bigint and typed arrays', () => {
         const value = {
             re:    /a+b/giu,
@@ -99,13 +54,12 @@ describe('json mode extras', () => {
             f64:   new Float64Array([ 1.5, -2.5 ])
         };
 
-        const result = roundTrip({ value, mode: 'json' }) as typeof value;
+        const result = roundTrip(value) as typeof value;
 
         expect(result.re).toBeInstanceOf(RegExp);
         expect(result.re.source).toBe('a+b');
         expect(result.re.flags).toBe('giu');
         expect(result.big).toBe(value.big);
-        expect(result.bytes).toBeInstanceOf(Uint8Array);
         expect([ ...result.bytes ]).toEqual([ 1, 2, 255 ]);
         expect(result.buf).toBeInstanceOf(ArrayBuffer);
         expect([ ...new Uint8Array(result.buf) ]).toEqual([ 9, 8 ]);
@@ -117,24 +71,76 @@ describe('json mode extras', () => {
         const backing = new Uint8Array([ 0, 0, 7, 8, 9 ]);
         const view = new Uint8Array(backing.buffer, 2, 2);
 
-        expect([ ...(roundTrip({ value: view, mode: 'json' }) as Uint8Array) ]).toEqual([ 7, 8 ]);
+        expect([ ...(roundTrip(view) as Uint8Array) ]).toEqual([ 7, 8 ]);
     });
 
     it('round-trips a bare undefined and undefined inside arrays', () => {
-        expect(roundTrip({ value: undefined, mode: 'json' })).toBeUndefined();
-        expect(roundTrip({ value: [ 1, undefined, 3 ], mode: 'json' })).toEqual([ 1, undefined, 3 ]);
+        expect(roundTrip(undefined)).toBeUndefined();
+        expect(roundTrip([ 1, undefined, 3 ])).toEqual([ 1, undefined, 3 ]);
     });
 
-    it('produces a string that is plain JSON', () => {
+    it('round-trips cycles and shared references', () => {
+        const shared = { name: 'shared' };
+
+        type Cyclic = { self ?: unknown, left : typeof shared, right : typeof shared, list : Array<unknown> };
+
+        const value : Cyclic = { left: shared, right: shared, list: [] };
+
+        value.self = value;
+        value.list.push(value.list);
+
+        const result = roundTrip(value) as Cyclic;
+
+        expect(result.self).toBe(result);
+        expect(result.left).toBe(result.right);
+        expect(result.left).toEqual({ name: 'shared' });
+        expect(result.list[0]).toBe(result.list);
+    });
+
+    it('escapes a user object that looks like a record', () => {
+        const value = { $type: 'function', $value: 'not a handle', extra: 1 };
+
+        expect(roundTrip(value)).toEqual(value);
+    });
+
+    it('escapes a nested record-looking object inside an array', () => {
+        expect(roundTrip([ { $type: 'map', $value: [] } ])).toEqual([ { $type: 'map', $value: [] } ]);
+    });
+
+    it('passes values with a $type key but no $value through the escape too', () => {
+        expect(roundTrip({ $type: 'only' })).toEqual({ $type: 'only' });
+    });
+});
+
+describe('the wire', () => {
+    it('is plain JSON-safe data that structuredClone also carries unchanged', () => {
+        const [ a, b ] = pair();
+        const value = { when: new Date(0), tag: /x/, nested: { list: [ 1, 2 ] }, map: new Map([ [ 1, 2 ] ]) };
+        const wire = a.encode({ value });
+
+        expect(JSON.parse(a.encodeJSON({ value }))).toEqual(wire);
+        expect(b.decode({ wire: structuredClone(wire) })).toEqual(value);
+    });
+
+    it('uses one record shape for every special value', () => {
         const [ a ] = pair();
-        const text = a.encodeJSON({ value: { when: new Date(0), tag: /x/ } });
 
-        expect(typeof text).toBe('string');
-
-        expect(JSON.parse(text)).toEqual({
+        expect(JSON.parse(a.encodeJSON({ value: { when: new Date(0), tag: /x/ } }))).toEqual({
             when: { $type: 'date', $value: '1970-01-01T00:00:00.000Z' },
             tag:  { $type: 'regexp', $value: { source: 'x', flags: '' } }
         });
+    });
+
+    it('passes a class instance through, which loses its prototype in transit', () => {
+        class Thing {
+            readonly label = 'thing';
+        }
+
+        const [ a, b ] = pair();
+        const result = b.decodeJSON({ text: a.encodeJSON({ value: new Thing() }) });
+
+        expect(result).toEqual({ label: 'thing' });
+        expect(result).not.toBeInstanceOf(Thing);
     });
 
     it('rejects an unknown record type on decode', () => {
@@ -146,41 +152,7 @@ describe('json mode extras', () => {
     it('rejects an unknown bytes kind on decode', () => {
         const [ , b ] = pair();
 
-        expect(() => b.decodeJSON({ text: JSON.stringify({ $type: `bytes`, $value: { kind: `Nope`, base64: `` } }) })).toThrow(/Unknown bytes kind/);
-    });
-});
-
-describe('clone mode', () => {
-    it('leaves structured-clone-native values untouched', () => {
-        const [ a ] = pair();
-        const date = new Date(0);
-        const bytes = new Uint8Array([ 1 ]);
-        const wire = a.encode({ value: { date, bytes, re: /x/ } }) as { date : unknown, bytes : unknown, re : unknown };
-
-        expect(wire.date).toBe(date);
-        expect(wire.bytes).toBe(bytes);
-        expect(wire.re).toBeInstanceOf(RegExp);
-    });
-
-    it('does not walk class instances', () => {
-        class Thing {
-            readonly fn = () : number => 1;
-        }
-
-        const [ a, b ] = pair();
-        const thing = new Thing();
-        const wire = a.encode({ value: { thing } }) as { thing : unknown };
-
-        expect(wire.thing).toBe(thing);
-        expect(a.liveHandleCount()).toBe(0);
-        expect((b.decode({ wire }) as { thing : Thing }).thing).toBe(thing);
-    });
-
-    it('survives structured clone itself', () => {
-        const [ a, b ] = pair();
-        const value = { nested: { list: [ 1, 2 ] }, when: new Date(5), map: new Map([ [ 1, 2 ] ]) };
-        const cloned = structuredClone(a.encode({ value }));
-
-        expect(b.decode({ wire: cloned })).toEqual(value);
+        expect(() => b.decodeJSON({ text: JSON.stringify({ $type: 'bytes', $value: { kind: 'Nope', base64: '' } }) }))
+            .toThrow(/Unknown bytes kind/);
     });
 });

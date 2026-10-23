@@ -2,7 +2,7 @@
 
 Serialize values across a boundary with the functions and promises inside them kept alive.
 
-Pass an object with a callback in it to another window, worker or process. On the far side, the callback is still callable: calling it runs the original where it lives and resolves with the result. Promises inside the value settle on the far side when they settle at home. Everything else goes across as data. That is the whole idea, and the package does only that: it does not open windows, send messages, or know what an origin is. Those are yours to plug in, which is how it stays small and how you keep control of security.
+Pass an object with a callback in it to another window, worker or process. On the far side, the callback is still callable: calling it runs the original where it lives and resolves with the result. Promises inside the value settle on the far side when they settle at home. Everything else goes across as plain JSON-safe data, with `Date`, `Map`, typed arrays and the like rebuilt on arrival. That is the whole idea, and the package does only that: it does not open windows, send messages, or know what an origin is. Those are yours to plug in, which is how it stays small and how you keep control of security.
 
 A sandestin, in Jack Vance's Dying Earth books, is a bound entity that carries out a magician's instructions from afar, for exactly as long as the binding holds. Same deal.
 
@@ -12,25 +12,25 @@ A sandestin, in Jack Vance's Dying Earth books, is a bound entity that carries o
 npm install sandestin
 ```
 
-ES modules, TypeScript types included, no dependencies. Needs `FinalizationRegistry`, `crypto.randomUUID` and `structuredClone`, so any current browser, Node 20+, Deno or Bun.
+ES modules, TypeScript types included, no dependencies. Needs `FinalizationRegistry`, `crypto.randomUUID` and `AbortSignal.timeout`, so any current browser, Node 20+, Deno or Bun.
 
 ## The idea in one example
 
 Two sides in one process, wired straight to each other. No messages, no transport, just the mechanism:
 
 ```ts
-import { createSerdes } from 'sandestin';
+import { sandestin } from 'sandestin';
 
 type Side = 'a' | 'b';
 
-const a = createSerdes<Side>({
+const a = sandestin<Side>({
     authorizeInboundRequest: ({ context }) => context === 'b',
     invokeRemoteFunction:    ({ handle, args }) => b.invokeLocalFunction({ handle, args, context: 'a' }),
     releaseRemoteHandle:     ({ handle }) => void b.releaseLocalHandle({ handle, context: 'a' }),
     watchRemotePromise:      ({ handle, listener }) => void b.watchLocalPromise({ handle, listener, context: 'a' })
 });
 
-const b = createSerdes<Side>({
+const b = sandestin<Side>({
     authorizeInboundRequest: ({ context }) => context === 'a',
     invokeRemoteFunction:    ({ handle, args }) => a.invokeLocalFunction({ handle, args, context: 'b' }),
     releaseRemoteHandle:     ({ handle }) => void a.releaseLocalHandle({ handle, context: 'b' }),
@@ -45,34 +45,79 @@ const cart = {
 };
 
 const wire = a.encode({ value: cart });
-// { name: 'cart', add: { $type: 'function', $value: '3f9a…' }, ready: { $type: 'promise', $value: '7c21…' } }
+// {
+//     name:  'cart',
+//     add:   { $type: 'function', $value: { handle: '3f9a…', name: 'add' } },
+//     ready: { $type: 'promise', $value: '7c21…' }
+// }
 
-// Side B decodes it and gets live references back.
-const copy = b.decode({ wire }) as Remote<typeof cart>;
+// Side B decodes it and gets live references back, typed as the far side's value.
+const copy = b.decode<typeof cart>({ wire });
 
 await copy.add({ id: 'B08N5WRWNW' });    // runs on side A, resolves here: 'added B08N5WRWNW'
 await copy.ready;                        // resolves when A's promise does
 ```
 
-Read the two `createSerdes` calls as "how do I reach the other side": each outbound hook on one instance calls the matching inbound method on the other. With a real transport, the hook posts a message and the far side calls the inbound method when it arrives. The instance's code is identical either way.
+Read the two `sandestin` calls as "how do I reach the other side": each outbound hook on one instance calls the matching inbound method on the other. With a real transport, the hook posts a message and the far side calls the inbound method when it arrives. The instance's code is identical either way.
 
 ## What crosses, and how
 
 Three rules:
 
-- **Data goes by value.** Objects, arrays, strings, numbers, booleans, `null`, and in the default mode anything `structuredClone` carries: `Date`, `Map`, `Set`, typed arrays, `undefined`, cycles. The serializer leaves these alone and lets the platform do the copying.
-- **Functions go by reference.** A function becomes a handle. The far side gets a *ref*: a function that, when called, sends the arguments back and resolves with the result. Arguments and results follow the same three rules, so callbacks nest to any depth and a ref can be handed back or forwarded on.
+- **Data goes by value.** Objects, arrays, strings, numbers, booleans and `null` are themselves on the wire. `Date`, `Map`, `Set`, `RegExp`, `bigint`, typed arrays, `ArrayBuffer`, `undefined`, cycles and shared references become small tagged records and are rebuilt on the far side as what they were. Anything else, a class instance say, is passed through as a plain object and loses its prototype, unless you register a custom type for it.
+- **Functions go by reference.** A function becomes a handle. The far side gets a *ref*: a function that, when called, sends the arguments back and resolves with the result. Arguments and results follow the same three rules, so callbacks nest to any depth and a ref can be handed back or forwarded on. The function's `name` travels with it, so a ref is named like the original and so are the errors about it.
 - **Promises go by reference.** A promise becomes a handle and the far side gets a real `Promise` that settles when the original does, with the resolved value or rejection reason crossing by these same rules.
 
 Errors are the one special case of data: an `Error` crosses with its `name`, `message`, `cause` chain and own properties intact, and arrives as a `RemoteError` whose `name` is the original's. Stacks stay home unless you opt in.
 
-### Two wire modes
+### One wire, three ways to carry it
 
-`encode` / `decode` produce and consume structured-cloneable values: hand them to `postMessage`, a `MessagePort`, a `Worker`, a `BroadcastChannel`. Nothing is stringified.
+The wire `encode` produces is plain JSON: only objects, arrays, strings, numbers, booleans and `null`. That one shape fits every transport.
 
-`encodeJSON` / `decodeJSON` produce and consume text for transports that carry strings: WebSocket, `child_process` IPC, HTTP. This mode adds its own records for what JSON cannot say: `Date`, `Map`, `Set`, `RegExp`, `bigint`, typed arrays and `ArrayBuffer` as base64, `undefined`, and cycles. `-0` becomes `0`, as it does in JSON.
+- `encode({ value })` gives you the wire as an object. Hand it to `postMessage`, a `MessagePort`, a `Worker` or a `BroadcastChannel` and it crosses as is.
+- `encodeJSON({ value })` gives you the same wire as text, for WebSocket, `child_process` IPC, HTTP and anything else that carries strings. `decodeJSON({ text })` is the inverse.
+- `encode({ value, transferable: true })` gives you `{ wire, transfer }`: `ArrayBuffer`s, typed arrays and `MessagePort`s are left native in the wire and listed in `transfer`, ready for `postMessage(wire, transfer)`. Without this flag bytes go as base64 and a `MessagePort` is refused, since there is no way to carry one as text.
 
-In both modes the special values share one record shape, `{ $type, $value }`. A user object that happens to have a `$type` key is escaped on the way out and unescaped on the way in, so there are no reserved keys.
+Every special value shares one record shape, `{ $type, $value }`. A user object that happens to have a `$type` key is escaped on the way out and unescaped on the way in, so there are no reserved keys. `-0` becomes `0`, as it does in JSON.
+
+### Custom types
+
+Register a type to carry your own classes by value:
+
+```ts
+import { sandestin } from 'sandestin';
+import type { CustomType } from 'sandestin';
+
+const money : CustomType<Money, { cents : number, currency : string }> = {
+    name:   'money',
+    test:   value => value instanceof Money,
+    encode: ({ value }) => ({ cents: value.cents, currency: value.currency }),
+    decode: ({ value }) => new Money(value.cents, value.currency)
+};
+
+const a = sandestin({ types: [ money ], /* ...hooks */ });
+```
+
+Custom types are tried before the built-ins, so you can override how a `Date` crosses if you need to. The encoded form is walked by the same rules, so it may contain functions, promises, other custom types, or anything else that crosses. Both sides must register the type; a record nobody can decode is an error, not a silent object.
+
+That last point is how you carry something by *reference*: encode it as an object of functions that act on the original, and add `release` to hear when the far side has let go of all of them:
+
+```ts
+const windowType : CustomType<Window, { postMessage : (message : unknown) => void, close : () => void }> = {
+    name: 'window',
+    test: value => value instanceof Window,
+
+    encode: ({ value }) => ({
+        postMessage: message => value.postMessage(message, '*'),
+        close:       () => value.close()
+    }),
+
+    decode:  ({ value }) => value,
+    release: ({ value }) => forget(value)
+};
+```
+
+The far side gets `{ postMessage, close }` as refs. Each call runs against the original window where it lives. When every one of those refs has been released or collected, `release` fires once with the window, which is where a wrapper would drop its own bookkeeping.
 
 ## Lifetime
 
@@ -91,25 +136,38 @@ release({ ref: copy.add });                     // done with it; idempotent
 using add = copy.add;                           // the same, at scope exit
 ```
 
+A call that has been released rejects with `ReleasedError`, and the message names the function: `Function add (3f9a…) has been released`.
+
 If none of those happen, the holder's garbage collector does it: when a ref becomes unreachable, a `FinalizationRegistry` sends the release. That is the safety net, not the mechanism. It runs when the collector feels like it, so anything that must happen promptly should be an explicit operation, an `unsubscribe()` rather than a dropped reference.
 
 `ref()` returns the function unchanged, tagged in a `WeakMap`, so it composes with anything and can be written inline in the object being encoded. Promises need none of this: their handle is released when they settle.
 
 `liveHandleCount()` tells you how many functions and promises an instance is currently holding for the other side. It exists for tests and leak checks.
 
+## Calling with a signal or a timeout
+
+A ref is a plain async function, and it also has `invoke`, which takes the arguments as a list plus an `AbortSignal`:
+
+```ts
+const result = await copy.add({ id: 'B08N5WRWNW' });
+const same = await copy.add.invoke({ args: [ { id: 'B08N5WRWNW' } ], signal: AbortSignal.timeout(5000) });
+```
+
+When the signal fires, the call rejects with the signal's reason and the transport hook sees the same signal, so it can stop waiting too. An already-aborted signal rejects without crossing at all. Set `callTimeout` on the instance and every call, plain or `invoke`, gets `AbortSignal.timeout(callTimeout)` combined with whatever you pass.
+
 ## Security
 
 The package never decides who may call what. It gives you one gate and an opaque context to decide with:
 
 ```ts
-const serdes = createSerdes<{ origin : string, source : Window }>({
+const peer = sandestin<{ origin : string, source : Window }>({
     authorizeInboundRequest: ({ handle, context, target }) =>
         context.origin === trustedOrigin && context.source === trustedWindow,
     // ...hooks
 });
 
 // Your transport attaches whatever it can vouch for to every inbound request:
-serdes.invokeLocalFunction({ handle, args, context: { origin: event.origin, source: event.source } });
+peer.invokeLocalFunction({ handle, args, context: { origin: event.origin, source: event.source } });
 ```
 
 `context` is whatever your transport puts there. This package never reads it; it passes it to your `authorizeInboundRequest` before every call, release and watch that arrives, and refuses with `UnauthorizedError` when you return `false`. A `postMessage` transport would put the sender's origin and window there and compare against what it recorded when it connected. A worker transport would put the port. The pair harness puts a string.
@@ -123,25 +181,28 @@ Absent gate means every request is allowed. Install one in anything that talks t
 
 ## API
 
-### `createSerdes<Context>(options)`
+### `sandestin<Context>(options)`
 
 One instance per peer. The options are the outbound half: what this side needs done on the other side.
 
 | Option | Called when | You should |
 | --- | --- | --- |
-| `invokeRemoteFunction({ handle, args })` | A ref on this side is called | Deliver the call; resolve with the far side's `Outcome` |
+| `invokeRemoteFunction({ handle, args, signal? })` | A ref on this side is called | Deliver the call; resolve with the far side's `Outcome`; stop waiting if `signal` fires |
 | `releaseRemoteHandle({ handle })` | A ref is released, or collected | Tell the far side; no reply |
 | `watchRemotePromise({ handle, listener })` | A promise handle is decoded | Deliver the far side's `Outcome` to `listener` when it has one |
 | `authorizeInboundRequest({ handle, context, target })` | Any inbound request arrives | Return `true` to allow; optional, default allows all |
+| `types` | Encoding and decoding | A list of `CustomType`s; optional |
+| `callTimeout` | Every outbound call | Milliseconds before a call rejects with a `TimeoutError`; optional |
 | `includeStacks` | Encoding an error | `true` to ship `stack`; default `false` |
 
 The returned instance has the inbound half, which your transport calls when a message arrives, plus the codec:
 
 | Method | Does |
 | --- | --- |
-| `encode({ value })` | Value to structured-cloneable wire; functions and promises become handles |
-| `decode({ wire })` | Wire to value; handles become refs and promises |
-| `encodeJSON({ value })` / `decodeJSON({ text })` | The same, as text |
+| `encode({ value })` | Value to JSON-safe wire; functions and promises become handles |
+| `encode({ value, transferable: true })` | The same, returning `{ wire, transfer }` with buffers and ports left native |
+| `decode<T>({ wire })` | Wire to value, typed `Remote<T>`; handles become refs and promises |
+| `encodeJSON({ value })` / `decodeJSON<T>({ text })` | The same, as text |
 | `invokeLocalFunction({ handle, args, context })` | Run a function this side encoded; resolves with an `Outcome`, never throws |
 | `releaseLocalHandle({ handle, context })` | The other side let go; fires that function's `onRelease` |
 | `watchLocalPromise({ handle, listener, context })` | Deliver a promise's `Outcome` to `listener` when known |
@@ -158,6 +219,7 @@ The returned instance has the inbound half, which your transport calls when a me
 | `revoke({ fn })` | Owner | Every handle to `fn` stops working |
 | `release({ ref })` | Holder | Done with a ref; `ref[Symbol.dispose]()` is the same |
 | `isRef(value)` | Holder | Whether a function came from the other side |
+| `ref.invoke({ args, signal? })` | Holder | The call as a list of arguments, with an `AbortSignal` |
 
 ### Errors
 
@@ -165,18 +227,18 @@ The returned instance has the inbound half, which your transport calls when a me
 
 ### Types
 
-`Remote<T>` is what `T` looks like after crossing: functions become `Ref`s (callable, async, disposable), promises stay promises, everything else is itself. `decode` returns `unknown` because it cannot know what came across; `decode({ wire }) as Remote<Api>` is the honest assertion.
+`Remote<T>` is what `T` looks like after crossing: functions become `Ref`s (callable, async, disposable, with `invoke`), promises stay promises, everything else is itself. `decode<Api>({ wire })` returns `Remote<Api>`; with no type argument it returns `unknown`, because the wire cannot say what came across. `CustomType<Value, Wire>` is the shape of a `types` entry.
 
 ### `sandestin/testing`
 
-`pair()` returns two instances wired directly to each other, as in the first example, with an optional `authorizeInboundRequest`. It is how this package tests itself and how a layer on top can test its protocol without a window.
+`pair()` returns two instances wired directly to each other, as in the first example, taking the same `authorizeInboundRequest`, `types`, `callTimeout` and `includeStacks` options. It is how this package tests itself and how a layer on top can test its protocol without a window.
 
 ## A transport in fifty lines
 
 The package ships no transport because a transport is small and yours should know your trust model. This is a complete one over `window.postMessage`, used by the test suite against a real iframe:
 
 ```ts
-import { createSerdes } from 'sandestin';
+import { sandestin } from 'sandestin';
 
 export const connect = ({ target, origin, onValue }) => {
     const pending = new Map();      // request id -> resolve
@@ -185,7 +247,7 @@ export const connect = ({ target, origin, onValue }) => {
 
     const post = message => target.postMessage(message, origin);
 
-    const serdes = createSerdes({
+    const peer = sandestin({
         authorizeInboundRequest: ({ context }) => context.origin === origin && context.source === target,
 
         invokeRemoteFunction: ({ handle, args }) => new Promise(resolve => {
@@ -212,36 +274,36 @@ export const connect = ({ target, origin, onValue }) => {
         const context = { origin: event.origin, source: event.source };
 
         switch (message.type) {
-            case 'value':   onValue(serdes.decode({ wire: message.wire })); break;
-            case 'invoke':  post({ type: 'result', id: message.id, outcome: await serdes.invokeLocalFunction({ handle: message.handle, args: message.args, context }) }); break;
+            case 'value':   onValue(peer.decode({ wire: message.wire })); break;
+            case 'invoke':  post({ type: 'result', id: message.id, outcome: await peer.invokeLocalFunction({ handle: message.handle, args: message.args, context }) }); break;
             case 'result':  pending.get(message.id)?.(message.outcome); pending.delete(message.id); break;
-            case 'release': serdes.releaseLocalHandle({ handle: message.handle, context }); break;
-            case 'watch':   serdes.watchLocalPromise({ handle: message.handle, listener: outcome => post({ type: 'settle', handle: message.handle, outcome }), context }); break;
+            case 'release': peer.releaseLocalHandle({ handle: message.handle, context }); break;
+            case 'watch':   peer.watchLocalPromise({ handle: message.handle, listener: outcome => post({ type: 'settle', handle: message.handle, outcome }), context }); break;
             case 'settle':  watchers.get(message.handle)?.(message.outcome); watchers.delete(message.handle); break;
         }
     });
 
-    return { send: value => post({ type: 'value', wire: serdes.encode({ value }) }) };
+    return { send: value => post({ type: 'value', wire: peer.encode({ value }) }) };
 };
 ```
 
-Five message types, one security check, and the transport never looks inside a value. The same shape over a `MessagePort`, a worker, or `child_process` IPC differs only in `post` and the event source, and the test suite runs all three.
+Five message types, one security check, and the transport never looks inside a value. The same shape over a `MessagePort`, a worker, or `child_process` IPC differs only in `post` and the event source, and the test suite runs all three; the child-process one carries the same wire as `JSON.stringify` text.
 
 ## How this differs from the neighbours
 
-**[post-robot](https://github.com/krakenjs/post-robot)** is the direct ancestor: JSON plus function references, passed across windows, with a `send`/`on` messaging layer and origin checks built in. sandestin keeps the rule and drops the rest. The serializer is structured-clone native instead of string based, promises cross as well as functions, references are released when the holder lets go instead of living until the window closes, the messaging layer and origin checks are left to you so the package is not tied to windows, and it targets current runtimes only, so there is no bridge for old browsers.
+**[post-robot](https://github.com/krakenjs/post-robot)** is the direct ancestor: JSON plus function references, passed across windows, with a `send`/`on` messaging layer and origin checks built in. sandestin keeps the rule and drops the rest. Promises cross as well as functions, references are released when the holder lets go instead of living until the window closes, functions carry their names, calls take a signal, the messaging layer and origin checks are left to you so the package is not tied to windows, and it targets current runtimes only, so there is no bridge for old browsers.
 
-**[universal-serialize](https://github.com/krakenjs/universal-serialize)** is post-robot's serializer: a `JSON.stringify` replacer with a per-type table. sandestin borrows that structure for its JSON mode and adds what it lacks: structured-clone mode, cycles, the reference table and lifetime, and the inbound gate. It is a different layer rather than an alternative; universal-serialize left function and promise handling as hooks for post-robot to fill, which is exactly the part this package owns.
+**[universal-serialize](https://github.com/krakenjs/universal-serialize)** is post-robot's serializer: a `JSON.stringify` replacer with a per-type table. sandestin borrows that structure, one record shape and a per-type table that you can extend, and adds what it lacks: cycles and shared references, transferables, the reference table and lifetime, and the inbound gate. It is a different layer rather than an alternative; universal-serialize left function and promise handling as hooks for post-robot to fill, which is exactly the part this package owns.
 
 **[Cap'n Web](https://github.com/cloudflare/capnweb)** is the serious prior art: an object-capability RPC with functions and objects by reference, bidirectional calls, promise pipelining and its own transports. It is a complete RPC system, and its lifetime rules follow from that: every stub must be explicitly disposed, a callback received as a parameter dies when the call returns unless duplicated, class instances must extend `RpcTarget` to cross by reference, and property reads on stubs are remote calls. sandestin chooses the other end of each of those:
 
 | | Cap'n Web | sandestin |
 | --- | --- | --- |
 | What it is | An RPC system with transports | A serializer with hooks |
-| Mental model | Object capabilities: stubs, targets, pipelining | `structuredClone` plus function references |
+| Mental model | Object capabilities: stubs, targets, pipelining | JSON plus function references |
 | A bare function passed across | Stub, disposed when the carrying call returns unless `.dup()` | Callable until the holder drops it, then collected |
 | Explicit lifetime | Required (`using` / `dispose`) | Optional (`once`, `release`, `revoke`), GC net underneath |
-| Objects with methods | Must extend `RpcTarget` | Plain objects; the functions inside are the references |
+| Objects with methods | Must extend `RpcTarget` | Plain objects; the functions inside are the references, or a custom type |
 | Property reads | Remote, pipelined | Local; data was copied |
 | Security | Capabilities are the model | Random handles plus a gate you write |
 | Transports | Built in: HTTP, WebSocket, `postMessage` | None; three hooks |
@@ -250,7 +312,7 @@ Pick Cap'n Web when you want RPC with pipelining and a capability discipline acr
 
 ## Status
 
-0.1.0. The surface is small on purpose and is expected to hold; the layer that adds `send`/`on` style messaging and connect-by-URL will be a separate package that depends on this one.
+0.2.0. The surface is small on purpose and is expected to hold; the layer that adds `send`/`on` style messaging and connect-by-URL will be a separate package that depends on this one.
 
 ## License
 

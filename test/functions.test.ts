@@ -1,4 +1,4 @@
-import type { Ref, Remote } from '../src';
+import type { Ref } from '../src';
 
 import { isRef, ref, release, ReleasedError, revoke } from '../src';
 
@@ -17,7 +17,7 @@ describe('functions cross as live references', () => {
             }
         };
 
-        const remote = b.decode({ wire: a.encode({ value: api }) }) as Remote<typeof api>;
+        const remote = b.decode<typeof api>({ wire: a.encode({ value: api }) });
 
         expect(await remote.add({ x: 2, y: 3 })).toBe(5);
         expect(calls).toEqual([ { x: 2, y: 3 } ]);
@@ -42,7 +42,7 @@ describe('functions cross as live references', () => {
             total: Promise.resolve(42)
         });
 
-        const remoteCart = b.decode({ wire: a.encode({ value: cart }) }) as Remote<typeof cart>;
+        const remoteCart = b.decode<typeof cart>({ wire: a.encode({ value: cart }) });
         const opened = await remoteCart();
         const item = await opened.add({ id: 'B1' });
 
@@ -76,26 +76,28 @@ describe('functions cross as live references', () => {
     it('encodes the same function to the same handle while it is live', () => {
         const [ a ] = pair();
         const fn = () : number => 1;
-        const first = a.encode({ value: fn }) as { $value : string };
-        const second = a.encode({ value: [ fn, fn ] }) as Array<{ $value : string }>;
+        const first = a.encode({ value: fn }) as { $value : { handle : string } };
+        const second = a.encode({ value: [ fn, fn ] }) as Array<{ $value : { handle : string } }>;
 
-        expect(second[0]?.$value).toBe(first.$value);
-        expect(second[1]?.$value).toBe(first.$value);
+        expect(second[0]?.$value.handle).toBe(first.$value.handle);
+        expect(second[1]?.$value.handle).toBe(first.$value.handle);
         expect(a.liveHandleCount()).toBe(1);
     });
 
     it('uses random, unguessable handles', () => {
         const [ a ] = pair();
-        const wire = a.encode({ value: [ () => 1, () => 2 ] }) as Array<{ $type : string, $value : string }>;
+        type FunctionRecord = { $type : string, $value : { handle : string } };
+
+        const wire = a.encode({ value: [ () => 1, () => 2 ] }) as Array<FunctionRecord>;
 
         expect(wire[0]?.$type).toBe('function');
-        expect(wire[0]?.$value).toMatch(/^[0-9a-f-]{36}$/);
-        expect(wire[0]?.$value).not.toBe(wire[1]?.$value);
+        expect(wire[0]?.$value.handle).toMatch(/^[0-9a-f-]{36}$/);
+        expect(wire[0]?.$value.handle).not.toBe(wire[1]?.$value.handle);
     });
 
     it('rejects an unknown handle with ReleasedError', async () => {
         const [ , b ] = pair();
-        const remote = b.decode({ wire: { $type: 'function', $value: 'no-such-handle' } }) as Ref;
+        const remote = b.decode({ wire: { $type: `function`, $value: { handle: `no-such-handle`, name: `ghost` } } }) as Ref;
 
         await expect(remote()).rejects.toBeInstanceOf(ReleasedError);
     });
@@ -178,7 +180,7 @@ describe('lifetime', () => {
             byClose:   ref({ fn: () => 4, onRelease: () => released.push('close') })
         };
 
-        const remote = b.decode({ wire: a.encode({ value: api }) }) as Remote<typeof api>;
+        const remote = b.decode<typeof api>({ wire: a.encode({ value: api }) });
 
         await remote.byOnce();
         release({ ref: remote.byRelease });

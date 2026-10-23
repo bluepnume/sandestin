@@ -1,6 +1,6 @@
 {
     "name": "sandestin",
-    "version": "0.1.0",
+    "version": "0.2.0",
     "description": "Serialize values across any boundary with functions and promises kept live. Pass a callback across, get back a reference that calls home; structured-clone native, JSON optional, lifetime and security in your hands.",
     "keywords": [
         "serialize",

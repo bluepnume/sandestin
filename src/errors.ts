@@ -27,20 +27,26 @@ export class RemoteError extends Error {
 
 export type HandleErrorOptions = {
     readonly handle : string,
+    // The function's name, when known, so the message can say which one.
+    readonly name ?: string,
 };
+
+const describe = ({ handle, name } : HandleErrorOptions) : string => (name
+    ? `Function ${ name } (${ handle })`
+    : `Handle ${ handle }`);
 
 // The handle no longer names anything: released, revoked, exhausted by
 // `once`, or never known to this side.
 export class ReleasedError extends RemoteError {
-    constructor({ handle } : HandleErrorOptions) {
-        super({ name: 'ReleasedError', message: `Handle ${ handle } has been released` });
+    constructor(options : HandleErrorOptions) {
+        super({ name: 'ReleasedError', message: `${ describe(options) } has been released` });
     }
 }
 
 // The inbound gate said no. Deliberately says nothing about why.
 export class UnauthorizedError extends RemoteError {
-    constructor({ handle } : HandleErrorOptions) {
-        super({ name: 'UnauthorizedError', message: `Not authorized to use handle ${ handle }` });
+    constructor(options : HandleErrorOptions) {
+        super({ name: 'UnauthorizedError', message: `Not authorized to use ${ describe(options) }` });
     }
 }
 /* eslint-enable unicorn/custom-error-definition */

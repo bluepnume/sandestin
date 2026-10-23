@@ -9,7 +9,6 @@ export const RECORD_TYPE = {
     PROMISE:   'promise',
     ERROR:     'error',
     ESCAPED:   'escaped',
-    // JSON mode only: things structured clone would have carried natively.
     UNDEFINED: 'undefined',
     DATE:      'date',
     REGEXP:    'regexp',
@@ -17,23 +16,24 @@ export const RECORD_TYPE = {
     SET:       'set',
     BIGINT:    'bigint',
     BYTES:     'bytes',
-    // JSON mode only: a second occurrence of an object already emitted.
+    // A second occurrence of a container already emitted: cycles and shared
+    // references.
     REF:       'ref'
 } as const;
 
-type RecordType = (typeof RECORD_TYPE)[keyof typeof RECORD_TYPE];
+export const BUILT_IN_RECORD_TYPES : ReadonlySet<string> = new Set(Object.values(RECORD_TYPE));
 
-export type TaggedRecord<Type extends RecordType = RecordType, Value = unknown> = {
+export type TaggedRecord<Type extends string = string, Value = unknown> = {
     readonly [ RECORD_KEY ] : Type,
     readonly [ RECORD_VALUE_KEY ] : Value,
 };
 
-type RecordOptions<Type extends RecordType, Value> = {
+type RecordOptions<Type extends string, Value> = {
     readonly type : Type,
     readonly value : Value,
 };
 
-export const record = <Type extends RecordType, Value>(
+export const record = <Type extends string, Value>(
     { type, value } : RecordOptions<Type, Value>
 ) : TaggedRecord<Type, Value> => ({
     [ RECORD_KEY ]:       type,
@@ -47,6 +47,12 @@ export const isRecord = (value : unknown) : value is TaggedRecord =>
 
 // A user object that would be mistaken for a record on the far side.
 export const needsEscaping = (value : object) : boolean => Object.hasOwn(value, RECORD_KEY);
+
+// What a function record carries: the handle, and the name for humans.
+export type EncodedFunction = {
+    readonly handle : string,
+    readonly name : string,
+};
 
 export type EncodedError = {
     readonly name : string,
@@ -89,27 +95,29 @@ const isViewKind = (kind : string) : kind is ViewKind => Object.hasOwn(VIEW_CONS
 export type Bytes = {
     readonly kind : BytesKind,
     readonly bytes : Uint8Array,
+    // The buffer a transferable encode would hand to postMessage.
+    readonly buffer : ArrayBuffer,
 };
 
-// Recognises the binary values JSON mode carries as base64, as a kind plus a
-// byte view over exactly the bytes they cover.
+// Recognises the binary values carried as base64, as a kind plus a byte view
+// over exactly the bytes they cover.
 export const bytesOf = (value : unknown) : Bytes | undefined => {
     if (value instanceof ArrayBuffer) {
-        return { kind: 'ArrayBuffer', bytes: new Uint8Array(value) };
+        return { kind: 'ArrayBuffer', bytes: new Uint8Array(value), buffer: value };
     }
 
-    if (!ArrayBuffer.isView(value) || value instanceof DataView) {
+    if (!ArrayBuffer.isView(value) || value instanceof DataView || !(value.buffer instanceof ArrayBuffer)) {
         return undefined;
     }
 
     const kind = value.constructor.name;
 
     return isViewKind(kind)
-        ? { kind, bytes: new Uint8Array(value.buffer, value.byteOffset, value.byteLength) }
+        ? { kind, bytes: new Uint8Array(value.buffer, value.byteOffset, value.byteLength), buffer: value.buffer }
         : undefined;
 };
 
-export const bytesFromKind = ({ kind, bytes } : Bytes) : ArrayBuffer | ArrayBufferView => {
+export const bytesFromKind = ({ kind, bytes } : Pick<Bytes, 'kind' | 'bytes'>) : ArrayBuffer | ArrayBufferView => {
     const buffer = new ArrayBuffer(bytes.byteLength);
 
     new Uint8Array(buffer).set(bytes);
@@ -124,3 +132,7 @@ export const bytesFromKind = ({ kind, bytes } : Bytes) : ArrayBuffer | ArrayBuff
 
     return new VIEW_CONSTRUCTORS[kind](buffer);
 };
+
+// A MessagePort can only cross as a transferable; there is no text form.
+export const isMessagePort = (value : unknown) : value is MessagePort =>
+    typeof MessagePort !== 'undefined' && value instanceof MessagePort;
