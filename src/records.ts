@@ -18,7 +18,10 @@ export const RECORD_TYPE = {
     BYTES:     'bytes',
     // A second occurrence of a container already emitted: cycles and shared
     // references.
-    REF:       'ref'
+    REF:       'ref',
+    // A ref or remote promise sent back to the side it came from: names the
+    // owner's own handle, so the owner gets its original back.
+    RETURNED:  'returned'
 } as const;
 
 export const BUILT_IN_RECORD_TYPES : ReadonlySet<string> = new Set(Object.values(RECORD_TYPE));
@@ -52,6 +55,11 @@ export const needsEscaping = (value : object) : boolean => Object.hasOwn(value, 
 export type EncodedFunction = {
     readonly handle : string,
     readonly name : string,
+};
+
+export type EncodedReturned = {
+    readonly kind : 'function' | 'promise',
+    readonly handle : string,
 };
 
 export type EncodedError = {

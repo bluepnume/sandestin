@@ -52,10 +52,10 @@ export const createPeer = ({ channel, post, onValue, authorizeInboundRequest } :
 
         releaseRemoteHandle: ({ handle }) => post({ type: 'release', handle }),
 
-        watchRemotePromise: ({ handle, listener }) => {
-            watchers.set(handle, listener);
+        watchRemotePromise: ({ handle }) => new Promise(resolve => {
+            watchers.set(handle, resolve);
             post({ type: 'watch', handle });
-        }
+        })
     });
 
     const receive = (envelope : Envelope) : void => {
@@ -76,11 +76,14 @@ export const createPeer = ({ channel, post, onValue, authorizeInboundRequest } :
                 void serdes.releaseLocalHandle({ handle: envelope.handle, context }).catch(() => undefined);
                 break;
             case 'watch':
-                void serdes.watchLocalPromise({
-                    handle:   envelope.handle,
-                    listener: outcome => post({ type: 'settle', handle: envelope.handle, outcome }),
-                    context
-                }).catch(() => undefined);
+                void serdes.watchLocalPromise({ handle: envelope.handle, context }).then(
+                    outcome => post({ type: 'settle', handle: envelope.handle, outcome }),
+                    (err : unknown) => post({
+                        type:    'settle',
+                        handle:  envelope.handle,
+                        outcome: { ok: false, error: serdes.encode({ value: err }) }
+                    })
+                );
 
                 break;
             case 'settle':

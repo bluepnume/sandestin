@@ -84,10 +84,10 @@ describe('promises cross as handles', () => {
         const [ a ] = pair();
         const fnHandle = (a.encode({ value: () => 1 }) as { $value : { handle : string } }).$value.handle;
 
-        await expect(a.watchLocalPromise({ handle: 'nope', listener: () => undefined, context: { from: 'b' } }))
+        await expect(a.watchLocalPromise({ handle: 'nope', context: { from: 'b' } }))
             .rejects.toBeInstanceOf(ReleasedError);
 
-        await expect(a.watchLocalPromise({ handle: fnHandle, listener: () => undefined, context: { from: 'b' } }))
+        await expect(a.watchLocalPromise({ handle: fnHandle, context: { from: 'b' } }))
             .rejects.toBeInstanceOf(ReleasedError);
     });
 
@@ -111,5 +111,29 @@ describe('promises cross as handles', () => {
         const remote = b.decodeJSON({ text }) as { p : Promise<number> };
 
         expect(await remote.p).toBe(7);
+    });
+});
+
+describe('a remote promise sent back to its owner', () => {
+    it('decodes as the original promise', async () => {
+        const [ a, b ] = pair();
+        const original = Promise.resolve('home');
+        const remote = b.decode<Promise<string>>({ wire: a.encode({ value: original }) });
+        const returned = a.decode<Promise<string>>({ wire: b.encode({ value: remote }) });
+
+        expect(returned).toBe(original);
+        expect(await returned).toBe('home');
+    });
+
+    it('is a rejected stand-in once the owner has let go of it', async () => {
+        const [ a, b ] = pair();
+        const remote = b.decode<Promise<string>>({ wire: a.encode({ value: Promise.resolve('gone') }) });
+
+        expect(await remote).toBe('gone');
+        expect(a.liveHandleCount()).toBe(0);
+
+        const returned = a.decode<Promise<string>>({ wire: b.encode({ value: remote }) });
+
+        await expect(returned).rejects.toBeInstanceOf(ReleasedError);
     });
 });

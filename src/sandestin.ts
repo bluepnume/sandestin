@@ -1,5 +1,5 @@
 import type { CustomType } from './custom-types';
-import type { EncodedFunction } from './records';
+import type { EncodedFunction, EncodedReturned } from './records';
 import type {
     Encode, Encoded, Handle, InvokeOptions, Outcome,
     Ref, Remote, Sandestin, SandestinOptions, TransferableEncoded
@@ -16,29 +16,50 @@ type AuthorizeOptions<Context> = {
     readonly context : Context,
 };
 
-type EncodeInOptions = {
+type EncodeInOptions<Context> = {
     readonly value : unknown,
     readonly transferable : boolean,
+    readonly context : Context | undefined,
 };
 
-type Core = {
-    readonly encodeIn : (options : EncodeInOptions) => TransferableEncoded,
-    readonly decodeIn : (options : { readonly wire : Encoded }) => unknown,
-    readonly settle : (options : { readonly outcome : Outcome }) => unknown,
-    readonly createRef : (options : EncodedFunction) => Ref,
-    readonly createRemotePromise : (options : { readonly handle : Handle }) => Promise<unknown>,
-    readonly trackPromise : (options : { readonly handle : Handle, readonly promise : Promise<unknown> }) => void,
+type DecodeInOptions<Context> = {
+    readonly wire : Encoded,
+    readonly context : Context | undefined,
 };
 
-// Runs `step` now and reports its outcome as a promise, without deferring the
+type SettleOptions<Context> = {
+    readonly outcome : Outcome,
+    readonly context : Context | undefined,
+};
+
+// Where a ref or remote promise came from: the handle it names on the other
+// side and the context it was decoded under.
+type Holding<Context> = {
+    readonly handle : Handle,
+    readonly context : Context | undefined,
+};
+
+type Core<Context> = {
+    readonly encodeIn : (options : EncodeInOptions<Context>) => TransferableEncoded,
+    readonly decodeIn : (options : DecodeInOptions<Context>) => unknown,
+    readonly settle : (options : SettleOptions<Context>) => unknown,
+    readonly createRef : (options : EncodedFunction & { readonly context : Context | undefined }) => Ref,
+    readonly createRemotePromise : (options : Holding<Context>) => Promise<unknown>,
+    readonly original : (options : EncodedReturned) => unknown,
+    readonly trackPromise : (options : Holding<Context> & { readonly promise : Promise<unknown> }) => void,
+};
+
+const asError = (err : unknown) : Error => (err instanceof Error
+    ? err
+    : new Error(String(err)));
+
+// Runs `step` now and reports its result as a promise, without deferring the
 // synchronous part to a microtask the way an `async` wrapper would.
-const settled = (step : () => void | Promise<void>) : Promise<void> => {
+const settled = <Result>(step : () => Result | Promise<Result>) : Promise<Awaited<Result>> => {
     try {
         return Promise.resolve(step());
     } catch (err) {
-        return Promise.reject(err instanceof Error
-            ? err
-            : new Error(String(err)));
+        return Promise.reject(asError(err));
     }
 };
 
@@ -46,13 +67,7 @@ const settled = (step : () => void | Promise<void>) : Promise<void> => {
 // plain aborts; anything else is wrapped so a catch always sees one.
 type AbortReasonOptions = { readonly signal : AbortSignal };
 
-const abortReason = ({ signal } : AbortReasonOptions) : Error => {
-    const reason : unknown = signal.reason;
-
-    return reason instanceof Error
-        ? reason
-        : new Error(String(reason));
-};
+const abortReason = ({ signal } : AbortReasonOptions) : Error => asError(signal.reason);
 
 // Rejects as soon as `signal` fires, otherwise settles with `promise`.
 type AbortableOptions<Result> = {
@@ -111,16 +126,21 @@ export const sandestin = <Context = unknown>({
 
     // Holder side: handles this side has been given, and how to let go of each.
     const heldReleasers = new Map<Handle, () => void>();
+
+    // Holder side: the refs and remote promises this instance has made, with
+    // the handle and context each came from. Sending one back names that
+    // handle; calling one carries that context.
+    const holdings = new WeakMap<object, Holding<Context>>();
     const releasedHandles = new Set<Handle>();
 
     // The garbage-collection net: a proxy nobody references any more releases
     // its handle on the far side, if nothing released it explicitly first.
-    const finalization = new FinalizationRegistry<Handle>(handle => {
+    const finalization = new FinalizationRegistry<Holding<Context>>(({ handle, context }) => {
         if (releasedHandles.has(handle)) {
             releasedHandles.delete(handle);
         } else {
             heldReleasers.delete(handle);
-            releaseRemoteHandle({ handle });
+            releaseRemoteHandle({ handle, context });
         }
     });
 
@@ -128,47 +148,84 @@ export const sandestin = <Context = unknown>({
 
     // The pieces that refer to each other, kept on one object so each can
     // reach the others without ordering games.
-    const core : Core = {
-        encodeIn: ({ value, transferable }) => encodeWalk({
+    const core : Core<Context> = {
+        encodeIn: ({ value, transferable, context }) => encodeWalk({
             value,
+            context,
             includeStacks,
             types:      customTypes,
             transferable,
-            onFunction: ({ fn }) => table.registerFunction({ fn }),
+            onFunction: ({ fn }) => table.registerFunction({ fn, context }),
             onGroup:    group => table.registerGroup(group),
+            homeHandle: ({ target }) => holdings.get(target)?.handle,
 
             onPromise: ({ promise }) => {
-                const { handle, fresh } = table.registerPromise({ promise });
+                const { handle, fresh } = table.registerPromise({ promise, context });
 
                 if (fresh) {
-                    core.trackPromise({ handle, promise });
+                    const entry = table.get({ handle });
+
+                    if (entry?.kind === 'promise') {
+                        core.trackPromise({ handle, promise: entry.promise, context });
+                    }
                 }
 
                 return handle;
             }
         }),
 
-        decodeIn: ({ wire }) => decodeWalk({
+        decodeIn: ({ wire, context }) => decodeWalk({
             wire,
+            context,
             types:      customTypes,
-            onFunction: encoded => core.createRef(encoded),
-            onPromise:  ({ handle }) => core.createRemotePromise({ handle })
+            onFunction: ({ handle, name }) => core.createRef({ handle, name, context }),
+            onPromise:  ({ handle }) => core.createRemotePromise({ handle, context }),
+            onReturned: ({ kind, handle }) => core.original({ kind, handle })
         }),
 
-        // What a ref or a remote promise does with an outcome.
-        settle: ({ outcome }) => {
-            if (outcome.ok) {
-                return core.decodeIn({ wire: outcome.value });
+        // The other side sent back something it got from here: hand back the
+        // very thing that was sent, or, if it has since been released, a
+        // stand-in that says so.
+        original: ({ kind, handle }) => {
+            const entry = table.get({ handle });
+
+            if (kind === 'function' && entry?.kind === 'function') {
+                return entry.fn;
             }
 
-            const error = core.decodeIn({ wire: outcome.error });
+            if (kind === 'promise' && entry?.kind === 'promise') {
+                return entry.target;
+            }
+
+            const error = new ReleasedError({ handle });
+
+            if (kind === 'function') {
+                return () => Promise.reject(error);
+            }
+
+            const rejected = Promise.reject(error);
+
+            // Already handled, so holding it without looking is not an
+            // unhandled rejection; awaiting it still throws.
+            rejected.catch(() => undefined);
+
+            return rejected;
+        },
+
+        // What a ref or a remote promise does with an outcome.
+        settle: ({ outcome, context }) => {
+            if (outcome.ok) {
+                return core.decodeIn({ wire: outcome.value, context });
+            }
+
+            const error = core.decodeIn({ wire: outcome.error, context });
 
             throw error instanceof Error
                 ? error
                 : new RemoteError({ name: 'Error', message: String(error), cause: error });
         },
 
-        createRef: ({ handle, name }) => {
+        createRef: ({ handle, name, context }) => {
             let released = false;
 
             const releaser = () : void => {
@@ -179,10 +236,12 @@ export const sandestin = <Context = unknown>({
                 released = true;
                 releasedHandles.add(handle);
                 heldReleasers.delete(handle);
-                releaseRemoteHandle({ handle });
+                releaseRemoteHandle({ handle, context });
             };
 
-            const invoke = async ({ args, signal } : InvokeOptions<ReadonlyArray<unknown>>) : Promise<unknown> => {
+            const invoke = async (
+                { args, signal, reply = true } : InvokeOptions<ReadonlyArray<unknown>>
+            ) : Promise<unknown> => {
                 if (released) {
                     throw new ReleasedError({ handle, name });
                 }
@@ -196,18 +255,21 @@ export const sandestin = <Context = unknown>({
                     ]
                 });
 
-                const encodedArgs = core.encodeIn({ value: args, transferable: false }).wire;
+                const encodedArgs = core.encodeIn({ value: args, transferable: false, context }).wire;
 
                 if (combined?.aborted) {
                     throw abortReason({ signal: combined });
                 }
 
                 const outcome = await abortable({
-                    promise: invokeRemoteFunction({ handle, args: encodedArgs, signal: combined }),
+                    promise: invokeRemoteFunction({ handle, args: encodedArgs, signal: combined, reply, context }),
                     signal:  combined
                 });
 
-                return core.settle({ outcome });
+                // Fire and forget: whatever came back, if anything, is dropped.
+                return !reply || outcome === undefined
+                    ? undefined
+                    : core.settle({ outcome, context });
             };
 
             const proxy = (...args : ReadonlyArray<unknown>) : Promise<unknown> => invoke({ args });
@@ -217,37 +279,31 @@ export const sandestin = <Context = unknown>({
             const proxyRef = Object.assign(proxy, { invoke, [ Symbol.dispose ]: releaser }) as Ref;
 
             heldReleasers.set(handle, releaser);
+            holdings.set(proxyRef, { handle, context });
             registerRef({ proxy: proxyRef, releaser });
-            finalization.register(proxyRef, handle);
+            finalization.register(proxyRef, { handle, context });
 
             return proxyRef;
         },
 
-        createRemotePromise: ({ handle }) => new Promise((resolve, reject) => {
-            watchRemotePromise({
-                handle,
+        createRemotePromise: ({ handle, context }) => {
+            const promise = settled(() => watchRemotePromise({ handle, context }))
+                .then(outcome => core.settle({ outcome, context }));
 
-                listener: outcome => {
-                    try {
-                        resolve(core.settle({ outcome }));
-                    } catch (err) {
-                        reject(err instanceof Error
-                            ? err
-                            : new Error(String(err)));
-                    }
-                }
-            });
-        }),
+            holdings.set(promise, { handle, context });
 
-        trackPromise: ({ handle, promise }) => {
+            return promise;
+        },
+
+        trackPromise: ({ handle, promise, context }) => {
             promise.then(
                 value => table.settle({
                     handle,
-                    outcome: { ok: true, value: core.encodeIn({ value, transferable: false }).wire }
+                    outcome: { ok: true, value: core.encodeIn({ value, transferable: false, context }).wire }
                 }),
                 (err : unknown) => table.settle({
                     handle,
-                    outcome: { ok: false, error: core.encodeIn({ value: err, transferable: false }).wire }
+                    outcome: { ok: false, error: core.encodeIn({ value: err, transferable: false, context }).wire }
                 })
             ).catch(() => {
                 // The promise had already been released; nothing to deliver to.
@@ -269,9 +325,9 @@ export const sandestin = <Context = unknown>({
 
         const target = entry.kind === 'function'
             ? entry.fn
-            : entry.promise;
+            : entry.target;
 
-        const verdict = authorizeInboundRequest({ handle, context, target });
+        const verdict = authorizeInboundRequest({ handle, context, handleContext: entry.context, target });
 
         const proceed = (ok : boolean) : Result => {
             if (!ok) {
@@ -297,27 +353,33 @@ export const sandestin = <Context = unknown>({
         }
     };
 
-    const encode = (({ value, transferable } : { readonly value : unknown, readonly transferable ?: true }) => {
+    type EncodeArguments = {
+        readonly value : unknown,
+        readonly transferable ?: true,
+        readonly context ?: Context,
+    };
+
+    const encode = (({ value, transferable, context } : EncodeArguments) => {
         assertOpen();
 
-        const result = core.encodeIn({ value, transferable: transferable === true });
+        const result = core.encodeIn({ value, transferable: transferable === true, context });
 
         return transferable === true
             ? result
             : result.wire;
-    }) as Encode;
+    }) as Encode<Context>;
 
-    const decode = <T>({ wire } : { readonly wire : Encoded }) : Remote<T> => {
+    const decode = <T>({ wire, context } : { readonly wire : Encoded, readonly context ?: Context }) : Remote<T> => {
         assertOpen();
 
-        return core.decodeIn({ wire }) as Remote<T>;
+        return core.decodeIn({ wire, context }) as Remote<T>;
     };
 
     return {
         encode,
         decode,
-        encodeJSON: ({ value }) => JSON.stringify(encode({ value })),
-        decodeJSON: ({ text }) => decode({ wire: JSON.parse(text) }),
+        encodeJSON: ({ value, context }) => JSON.stringify(encode({ value, context })),
+        decodeJSON: ({ text, context }) => decode({ wire: JSON.parse(text), context }),
 
         invokeLocalFunction: async ({ handle, args, context }) => {
             try {
@@ -329,22 +391,25 @@ export const sandestin = <Context = unknown>({
                     throw new ReleasedError({ handle });
                 }
 
-                const decodedArgs = core.decodeIn({ wire: args }) as ReadonlyArray<unknown>;
+                const decodedArgs = core.decodeIn({ wire: args, context }) as ReadonlyArray<unknown>;
+                const { authorize, once } = entry.options;
 
-                if (entry.options.authorize && !await entry.options.authorize({ context, args: decodedArgs })) {
+                if (authorize && !await authorize({ context, handleContext: entry.context, args: decodedArgs })) {
                     throw new UnauthorizedError({ handle, name: entry.fn.name });
                 }
 
-                if (entry.options.once) {
+                if (once) {
                     table.release({ handle });
                 }
 
-                const fn = entry.fn as (...args : ReadonlyArray<unknown>) => unknown;
-                const result : unknown = await fn(...decodedArgs);
+                // The function runs with the request's context as `this`, so
+                // one that cares who is calling can look without a wrapper.
+                const fn = entry.fn as (this : Context, ...args : ReadonlyArray<unknown>) => unknown;
+                const result : unknown = await fn.call(context, ...decodedArgs);
 
-                return { ok: true, value: core.encodeIn({ value: result, transferable: false }).wire };
+                return { ok: true, value: core.encodeIn({ value: result, transferable: false, context }).wire };
             } catch (err) {
-                return { ok: false, error: core.encodeIn({ value: err, transferable: false }).wire };
+                return { ok: false, error: core.encodeIn({ value: err, transferable: false, context }).wire };
             }
         },
 
@@ -354,8 +419,16 @@ export const sandestin = <Context = unknown>({
                 : Promise.resolve();
         },
 
-        watchLocalPromise: ({ handle, listener, context }) =>
-            settled(() => authorized({ handle, context, allowed: () => table.watch({ handle, listener }) })),
+        watchLocalPromise: ({ handle, context }) => settled(() => authorized({
+            handle,
+            context,
+
+            allowed: () => new Promise<Outcome>(resolve => {
+                table.watch({ handle, listener: resolve });
+            })
+        })),
+
+        hasHandle: ({ handle }) => table.get({ handle }) !== undefined,
 
         liveHandleCount: () => table.size(),
 

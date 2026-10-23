@@ -56,13 +56,13 @@ describe('authorizeInboundRequest', () => {
         await expect(a.releaseLocalHandle({ handle: fnHandle, context: { from: `b` } })).rejects.toBeInstanceOf(UnauthorizedError);
         expect(a.liveHandleCount()).toBe(2);
 
-        await expect(a.watchLocalPromise({ handle: promiseHandle, listener: () => undefined, context: { from: 'b' } }))
+        await expect(a.watchLocalPromise({ handle: promiseHandle, context: { from: 'b' } }))
             .rejects.toBeInstanceOf(UnauthorizedError);
 
-        // The decoder on b still gets a promise; it just never settles.
+        // The decoder on b gets a promise that rejects with the refusal.
         const pending = b.decode<Promise<unknown>>({ wire: { $type: 'promise', $value: promiseHandle } });
 
-        expect(pending).toBeInstanceOf(Promise);
+        await expect(pending).rejects.toBeInstanceOf(UnauthorizedError);
     });
 
     it('a released handle reports ReleasedError before the gate is consulted', async () => {

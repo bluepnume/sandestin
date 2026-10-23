@@ -249,3 +249,75 @@ describe('lifetime', () => {
         expect(() => b.decodeJSON({ text: '1' })).toThrow(/closed/);
     });
 });
+
+describe('a ref sent back to its owner', () => {
+    it('decodes as the original function, called directly', () => {
+        const [ a, b ] = pair();
+        const calls : Array<number> = [];
+
+        const original = (x : number) : number => {
+            calls.push(x);
+
+            return x * 2;
+        };
+
+        const remote = b.decode<typeof original>({ wire: a.encode({ value: original }) });
+        const wire = b.encode({ value: { fn: remote } });
+        const returned : unknown = a.decode({ wire });
+        const { fn } = returned as { fn : typeof original };
+
+        expect(fn).toBe(original);
+        expect(fn(2)).toBe(4);
+        expect(calls).toEqual([ 2 ]);
+        expect(b.liveHandleCount()).toBe(0);
+    });
+
+    it('crosses as a returned record naming the owner handle', () => {
+        const [ a, b ] = pair();
+        const wire = a.encode({ value: () => 1 }) as { $value : { handle : string } };
+        const remote = b.decode({ wire });
+
+        expect(b.encode({ value: remote })).toEqual({
+            $type:  'returned',
+            $value: { kind: 'function', handle: wire.$value.handle }
+        });
+    });
+
+    it('is a stand-in that rejects when the owner has already released it', async () => {
+        const [ a, b ] = pair();
+        const once = ref({ fn: () => 'first', once: true });
+        const remote = b.decode<typeof once>({ wire: a.encode({ value: once }) });
+
+        expect(await remote()).toBe('first');
+
+        const returned = a.decode<typeof once>({ wire: b.encode({ value: remote }) });
+
+        expect(returned).not.toBe(once);
+        await expect(returned()).rejects.toBeInstanceOf(ReleasedError);
+    });
+
+    it('still relays a ref to a third side as a new handle', async () => {
+        const [ a, b ] = pair();
+        const [ b2, c ] = pair();
+        const original = () : string => 'from a';
+        const onB = b.decode<typeof original>({ wire: a.encode({ value: original }) });
+        const onC = c.decode<typeof original>({ wire: b2.encode({ value: onB }) });
+
+        expect(await onC()).toBe('from a');
+        expect(b2.liveHandleCount()).toBe(1);
+    });
+});
+
+describe('the request context', () => {
+    it('is the this value of the function being called', async () => {
+        const [ a, b ] = pair();
+
+        const whoAsked = function (this : { from : string }) : string {
+            return `asked by ${ this.from }`;
+        };
+
+        const remote = b.decode<typeof whoAsked>({ wire: a.encode({ value: whoAsked }) });
+
+        expect(await remote()).toBe('asked by b');
+    });
+});

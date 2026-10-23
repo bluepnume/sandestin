@@ -9,8 +9,8 @@ export type PairContext = {
 type Inherited = 'authorizeInboundRequest' | 'includeStacks' | 'types' | 'callTimeout';
 
 export type PairOptions = Pick<SandestinOptions<PairContext>, Inherited> & {
-    // Where a refused release or watch ends up. A real transport would drop
-    // these on the floor too; the default does the same, visibly named.
+    // Where a refused release ends up. A real transport would drop it on the
+    // floor too; the default does the same, visibly named.
     readonly onError ?: (err : unknown) => void,
 };
 
@@ -40,9 +40,7 @@ const side = ({ other, from, options, onError } : SideOptions) : Sandestin<PairC
         void other().releaseLocalHandle({ handle, context: { from } }).catch(onError);
     },
 
-    watchRemotePromise: ({ handle, listener }) => {
-        void other().watchLocalPromise({ handle, listener, context: { from } }).catch(onError);
-    }
+    watchRemotePromise: ({ handle }) => other().watchLocalPromise({ handle, context: { from } })
 });
 
 // Two instances wired directly to each other. No messages, no transport.

@@ -9,16 +9,22 @@ type FunctionEntry<Context> = {
     readonly kind : 'function',
     readonly fn : AnyFunction,
     readonly options : RefOptions<Context>,
+    // The context it was encoded under: who it was handed to.
+    readonly context : Context | undefined,
 };
 
-type PromiseEntry = {
+type PromiseEntry<Context> = {
     readonly kind : 'promise',
+    // What was encoded: a native promise or any thenable.
+    readonly target : object,
+    // The same, adopted into a native promise.
     readonly promise : Promise<unknown>,
+    readonly context : Context | undefined,
     outcome : Outcome | undefined,
     readonly listeners : Array<(outcome : Outcome) => void>,
 };
 
-type TableEntry<Context> = FunctionEntry<Context> | PromiseEntry;
+type TableEntry<Context> = FunctionEntry<Context> | PromiseEntry<Context>;
 
 type WatchOptions = {
     readonly handle : Handle,
@@ -28,6 +34,16 @@ type WatchOptions = {
 type RegisteredPromise = {
     readonly handle : Handle,
     readonly fresh : boolean,
+};
+
+type RegisterFunctionOptions<Context> = {
+    readonly fn : AnyFunction,
+    readonly context : Context | undefined,
+};
+
+type RegisterPromiseOptions<Context> = {
+    readonly promise : object,
+    readonly context : Context | undefined,
 };
 
 type SettleOptions = {
@@ -46,10 +62,10 @@ type Group = {
 // still has to honour. One per instance; handles are random so holding one
 // is the only way to name what it points at.
 type Table<Context> = {
-    readonly registerFunction : (options : { readonly fn : AnyFunction }) => Handle,
+    readonly registerFunction : (options : RegisterFunctionOptions<Context>) => Handle,
     // Returns the handle and whether it is new, so the caller can start
     // watching the promise exactly once.
-    readonly registerPromise : (options : { readonly promise : Promise<unknown> }) => RegisteredPromise,
+    readonly registerPromise : (options : RegisterPromiseOptions<Context>) => RegisteredPromise,
     readonly registerGroup : (group : HandleGroup) => void,
     readonly get : (options : { readonly handle : Handle }) => TableEntry<Context> | undefined,
     readonly release : (options : { readonly handle : Handle }) => void,
@@ -91,13 +107,13 @@ export const createTable = <Context>() : Table<Context> => {
             handlesByTarget.delete(entry.fn);
             entry.options.onRelease?.();
         } else {
-            handlesByTarget.delete(entry.promise);
+            handlesByTarget.delete(entry.target);
         }
 
         releaseFromGroups({ handle });
     };
 
-    const registerFunction = ({ fn } : { readonly fn : AnyFunction }) : Handle => {
+    const registerFunction = ({ fn, context } : RegisterFunctionOptions<Context>) : Handle => {
         const existing = handlesByTarget.get(fn);
 
         if (existing !== undefined) {
@@ -106,7 +122,7 @@ export const createTable = <Context>() : Table<Context> => {
 
         const handle = crypto.randomUUID();
 
-        entries.set(handle, { kind: 'function', fn, options: getRefOptions({ fn }) as RefOptions<Context> });
+        entries.set(handle, { kind: 'function', fn, options: getRefOptions({ fn }) as RefOptions<Context>, context });
         handlesByTarget.set(fn, handle);
         onRevoke({ fn, listener: () => release({ handle }) });
 
@@ -117,7 +133,9 @@ export const createTable = <Context>() : Table<Context> => {
         return handle;
     };
 
-    const deliver = ({ handle, entry } : { readonly handle : Handle, readonly entry : PromiseEntry }) : void => {
+    type DeliverOptions = { readonly handle : Handle, readonly entry : PromiseEntry<Context> };
+
+    const deliver = ({ handle, entry } : DeliverOptions) : void => {
         if (entry.outcome === undefined || entry.listeners.length === 0) {
             return;
         }
@@ -129,17 +147,18 @@ export const createTable = <Context>() : Table<Context> => {
         release({ handle });
     };
 
-    const registerPromise = ({ promise } : { readonly promise : Promise<unknown> }) : RegisteredPromise => {
-        const existing = handlesByTarget.get(promise);
+    const registerPromise = ({ promise: target, context } : RegisterPromiseOptions<Context>) : RegisteredPromise => {
+        const existing = handlesByTarget.get(target);
 
         if (existing !== undefined) {
             return { handle: existing, fresh: false };
         }
 
         const handle = crypto.randomUUID();
+        const promise = Promise.resolve(target as PromiseLike<unknown>);
 
-        entries.set(handle, { kind: 'promise', promise, outcome: undefined, listeners: [] });
-        handlesByTarget.set(promise, handle);
+        entries.set(handle, { kind: 'promise', target, promise, context, outcome: undefined, listeners: [] });
+        handlesByTarget.set(target, handle);
 
         return { handle, fresh: true };
     };

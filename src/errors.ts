@@ -8,9 +8,12 @@ export type RemoteErrorOptions = {
     readonly properties ?: Readonly<Record<string, unknown>>,
 };
 
+export const REMOTE_STACK_SEPARATOR = '--- remote call from here ---';
+
 // An error that happened on the other side, rebuilt here with the original
-// name and message. The local stack points at the call that failed; the
-// remote one is attached only when the other side chose to include it.
+// name and message. When the other side chose to include its stack, `stack`
+// reads as that stack and then the local one, with the raw remote stack kept
+// on `remoteStack`; otherwise `stack` is the local call that failed.
 export class RemoteError extends Error {
     readonly remoteStack : string | undefined;
 
@@ -21,6 +24,11 @@ export class RemoteError extends Error {
 
         this.name = name;
         this.remoteStack = stack;
+
+        if (stack !== undefined) {
+            this.stack = `${ stack }\n${ REMOTE_STACK_SEPARATOR }\n${ this.stack ?? '' }`;
+        }
+
         Object.assign(this, properties);
     }
 }

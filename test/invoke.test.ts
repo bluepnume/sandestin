@@ -101,7 +101,7 @@ describe('ref.invoke', () => {
     });
 
     it('hands the signal to the transport hook', async () => {
-        const seen : Array<InvokeRemoteFunctionOptions> = [];
+        const seen : Array<InvokeRemoteFunctionOptions<unknown>> = [];
         const [ a ] = pair();
 
         // Wrap b's hook by decoding through a third instance whose hook we own.
@@ -115,7 +115,7 @@ describe('ref.invoke', () => {
             },
 
             releaseRemoteHandle: () => undefined,
-            watchRemotePromise:  () => undefined
+            watchRemotePromise:  () => Promise.reject(new Error('not watched in this test'))
         });
 
         const remote = spy.decode<() => number>({ wire: a.encode({ value: () => 5 }) });

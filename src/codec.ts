@@ -1,5 +1,5 @@
 import type { CustomType } from './custom-types';
-import type { Bytes, EncodedError, EncodedFunction, TaggedRecord } from './records';
+import type { Bytes, EncodedError, EncodedFunction, EncodedReturned, TaggedRecord } from './records';
 import type { AnyFunction, Handle } from './types';
 
 import { base64ToBytes, bytesToBase64 } from './base64';
@@ -18,14 +18,19 @@ export type HandleGroup = {
 
 type EncodeWalkOptions = {
     readonly value : unknown,
+    // Handed to custom types and remembered by every handle made here.
+    readonly context : unknown,
     readonly includeStacks : boolean,
     readonly types : ReadonlyArray<CustomType>,
     // Leave binary and ports native and collect them for postMessage.
     readonly transferable : boolean,
     // Register a function or promise and get the handle that names it.
     readonly onFunction : (options : { readonly fn : AnyFunction }) => Handle,
-    readonly onPromise : (options : { readonly promise : Promise<unknown> }) => Handle,
+    readonly onPromise : (options : { readonly promise : object }) => Handle,
     readonly onGroup : (group : HandleGroup) => void,
+    // The handle a ref or remote promise was decoded from, when it came from
+    // the side this wire is for; it goes back as that handle, not a new one.
+    readonly homeHandle : (options : { readonly target : object }) => Handle | undefined,
 };
 
 type EncodeWalkResult = {
@@ -153,13 +158,14 @@ const walkCustom = ({ value, type, state } : EncodeStep<unknown> & { readonly ty
     try {
         // The encoded form is walked without this type, so an encoder whose
         // output still passes its own test does not recurse into itself.
-        const wire = state.walkSkipping({ value: type.encode({ value }), skip: type });
+        const context = state.context as never;
+        const wire = state.walkSkipping({ value: type.encode({ value, context }), skip: type });
 
         if (type.release) {
             const { release } = type;
 
             // Nothing to hold means nothing to wait for: tell the owner now.
-            state.onGroup({ handles, release: () => release({ value }) });
+            state.onGroup({ handles, release: () => release({ value, context }) });
         }
 
         return record({ type: type.name, value: wire });
@@ -207,6 +213,11 @@ const walkPlatform = ({ value, state } : EncodeStep<unknown>) : Handled => {
         : { handled: true, output: walkBytes({ value, bytes, state }) };
 };
 
+// Anything with a `then` method is a promise here, the same rule `await`
+// uses; it is adopted into a native promise on the way in.
+const isThenable = (value : unknown) : value is object & PromiseLike<unknown> =>
+    typeof value === 'object' && value !== null && typeof (value as { then ?: unknown }).then === 'function';
+
 const dispatch = ({ value, state, skip } : EncodeStep<unknown> & { readonly skip ?: CustomType }) : unknown => {
     const custom = state.types.find(type => type !== skip && type.test(value));
 
@@ -216,13 +227,29 @@ const dispatch = ({ value, state, skip } : EncodeStep<unknown> & { readonly skip
 
     if (typeof value === 'function') {
         const fn = value as AnyFunction;
+        const home = state.homeHandle({ target: fn });
+
+        if (home !== undefined) {
+            const returned : EncodedReturned = { kind: 'function', handle: home };
+
+            return record({ type: RECORD_TYPE.RETURNED, value: returned });
+        }
+
         const handle = collect({ handle: state.onFunction({ fn }), state });
         const encoded : EncodedFunction = { handle, name: fn.name };
 
         return record({ type: RECORD_TYPE.FUNCTION, value: encoded });
     }
 
-    if (value instanceof Promise) {
+    if (isThenable(value)) {
+        const home = state.homeHandle({ target: value });
+
+        if (home !== undefined) {
+            const returned : EncodedReturned = { kind: 'promise', handle: home };
+
+            return record({ type: RECORD_TYPE.RETURNED, value: returned });
+        }
+
         const handle = collect({ handle: state.onPromise({ promise: value }), state });
 
         return record({ type: RECORD_TYPE.PROMISE, value: handle });
@@ -282,9 +309,12 @@ export const encodeWalk = ({ value, ...options } : EncodeWalkOptions) : EncodeWa
 
 type DecodeWalkOptions = {
     readonly wire : unknown,
+    readonly context : unknown,
     readonly types : ReadonlyArray<CustomType>,
     readonly onFunction : (options : EncodedFunction) => AnyFunction,
     readonly onPromise : (options : { readonly handle : Handle }) => Promise<unknown>,
+    // One of this side's own handles coming back: the original it names.
+    readonly onReturned : (options : EncodedReturned) => unknown,
 };
 
 type DecodeState = Omit<DecodeWalkOptions, 'wire'> & {
@@ -389,7 +419,7 @@ const unwalkRecord = ({ wire, state } : DecodeStep<TaggedRecord>) : unknown => {
     const custom = state.types.find(type => type.name === wire.$type);
 
     if (custom) {
-        return custom.decode({ value: state.walk(value) });
+        return custom.decode({ value: state.walk(value), context: state.context });
     }
 
     switch (wire.$type) {
@@ -397,6 +427,8 @@ const unwalkRecord = ({ wire, state } : DecodeStep<TaggedRecord>) : unknown => {
             return state.onFunction(value as EncodedFunction);
         case RECORD_TYPE.PROMISE:
             return state.onPromise({ handle: value as Handle });
+        case RECORD_TYPE.RETURNED:
+            return state.onReturned(value as EncodedReturned);
         case RECORD_TYPE.ERROR:
             return decodeError({ wire: value as EncodedError, state });
         case RECORD_TYPE.ESCAPED:

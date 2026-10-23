@@ -4,6 +4,8 @@ import { refOptions, refReleasers, revocationListeners, revoked } from './ref-re
 
 export type AuthorizeRefOptions<Context> = {
     readonly context : Context,
+    // The context the function was encoded under, if any.
+    readonly handleContext : Context | undefined,
     readonly args : ReadonlyArray<unknown>,
 };
 

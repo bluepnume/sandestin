@@ -1,6 +1,6 @@
 import type { Ref } from '../src';
 
-import { ReleasedError, RemoteError, UnauthorizedError } from '../src';
+import { ReleasedError, REMOTE_STACK_SEPARATOR, RemoteError, UnauthorizedError } from '../src';
 
 import { pair } from './helpers';
 
@@ -68,7 +68,14 @@ describe('errors', () => {
         const loud = await loudRef().catch((caught : unknown) => caught) as RemoteError;
 
         expect(quiet.remoteStack).toBeUndefined();
+        expect(quiet.stack).not.toContain(REMOTE_STACK_SEPARATOR);
+
+        // With stacks included, `stack` reads remote first, then local,
+        // and the raw remote stack is kept on its own.
         expect(loud.remoteStack).toContain('boom');
+        expect(loud.stack).toContain(loud.remoteStack);
+        expect(loud.stack).toContain(REMOTE_STACK_SEPARATOR);
+        expect(loud.stack?.indexOf(REMOTE_STACK_SEPARATOR)).toBeGreaterThan(loud.stack?.indexOf('boom') ?? -1);
     });
 
     it('a thrown non-Error value is wrapped with the value on cause', async () => {
